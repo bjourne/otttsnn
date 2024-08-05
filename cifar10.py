@@ -6,9 +6,9 @@ import torch
 from itertools import islice
 from pathlib import Path
 from modules.neuron import OnlineLIFNode
+from modules.surrogate import Sigmoid
 
 from torchinfo import summary
-from torchview import draw_graph
 
 from torch.nn import MSELoss
 from torch.optim import SGD
@@ -30,15 +30,8 @@ from torchvision.transforms import (
 ########################################################################
 
 import torch.nn.functional as F
-
-
-import sys
 from models import spiking_vgg
-from modules import neuron, surrogate
-import argparse
-import math
-from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
-import torch.utils.data as data
+from utils import Bar, Logger, AverageMeter, accuracy
 
 _seed_ = 2022
 import random
@@ -60,36 +53,15 @@ LOG_DIR = Path('./logs')
 
 # Simulation settings
 N_T_STEPS = 6
+TAU = 2.0
 
 # Optimization settings
 LR = 0.1
 SGD_MOM = 0.9
 T_MAX=300
+LOSS_LAMBDA = 0.05
 
 def main():
-    parser = argparse.ArgumentParser(description='Classify CIFAR')
-    #parser.add_argument('-T', default=6, type=int, help='simulating time-steps')
-    parser.add_argument('-tau', default=2., type=float)
-    parser.add_argument('-j', default=4, type=int, metavar='N',
-                        help='number of data loading workers (default: 4)')
-    parser.add_argument('-step_size', default=100, type=float, help='step_size for StepLR')
-    parser.add_argument('-gamma', default=0.1, type=float, help='gamma for StepLR')
-    parser.add_argument('-T_max', default=300, type=int, help='T_max for CosineAnnealingLR')
-    parser.add_argument(
-        '-model',
-        type = str,
-        default = 'online_spiking_vgg11_ws'
-    )
-    parser.add_argument('-stochdepth_rate', type=float, default=0.0)
-    parser.add_argument('-cnf', type=str)
-    parser.add_argument('-T_train', default=None, type=int)
-    parser.add_argument('-dts_cache', type=str, default='./dts_cache')
-    parser.add_argument('-loss_lambda', type=float, default=0.05)
-    parser.add_argument('-online_update', action='store_true')
-
-    parser.add_argument('-gpu-id', default='0', type=str, help='gpu id')
-
-    args = parser.parse_args()
     trans_tr = Compose([
         RandomCrop(32, padding=4),
         Cutout(),
@@ -118,8 +90,7 @@ def main():
     l_tr = DataLoader(
         trainset,
         batch_size=BS,
-        shuffle=True,
-        num_workers=args.j
+        shuffle=True
     )
 
     d_te = CIFAR10(
@@ -128,15 +99,13 @@ def main():
         download=False,
         transform=trans_te
     )
-    l_te = DataLoader(d_te, batch_size=BS, shuffle=False, num_workers=args.j)
+    l_te = DataLoader(d_te, batch_size=BS, shuffle=False)
 
-    model_name = args.model
-    model = spiking_vgg.__dict__[model_name]
+    model = spiking_vgg.__dict__['online_spiking_vgg11_ws']
     print(model)
     net = model(
-        single_step_neuron = OnlineLIFNode,
-        tau = args.tau,
-        surrogate_function = surrogate.Sigmoid(alpha=4.),
+        tau = TAU,
+        surrogate_function = Sigmoid(alpha=4),
         track_rate = True,
         c_in = 3,
         neuron_dropout = 0.0,
@@ -156,8 +125,7 @@ def main():
 
     max_test_acc = 0
 
-    out_dir = os.path.join(LOG_DIR, f'{args.model}_{args.cnf}_T_6_T_train_{args.T_train}_sgd_lr_{LR}_')
-    out_dir += f'CosALR_{T_MAX}'
+    out_dir = os.path.join(LOG_DIR, f'basic')
 
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
@@ -169,10 +137,6 @@ def main():
     if not os.path.exists(pt_dir):
         os.makedirs(pt_dir)
         print(f'Mkdir {pt_dir}.')
-
-
-    with open(os.path.join(out_dir, 'args.txt'), 'w', encoding='utf-8') as args_txt:
-        args_txt.write(str(args))
 
     writer = SummaryWriter(os.path.join(out_dir, 'logs'), purge_step=0)
 
@@ -195,46 +159,32 @@ def main():
         train_acc = 0
         train_samples = 0
         batch_idx = 0
-        for frame, label in l_tr:
+        for frame, label in islice(l_tr, 5):
             batch_idx += 1
             frame = frame.float()
-            #t_step = args.T
-
             batch_loss = 0
-            if not args.online_update:
-                optimizer.zero_grad()
+            optimizer.zero_grad()
             for t in range(N_T_STEPS):
-                if args.online_update:
-                    optimizer.zero_grad()
-                input_frame = frame
-                if True:
-                    if t == 0:
-                        out_fr = net(input_frame, init=True)
-                        total_fr = out_fr.clone().detach()
-                    else:
-                        out_fr = net(input_frame)
-                        total_fr += out_fr.clone().detach()
-                    if args.loss_lambda > 0.0:
-                        label_one_hot = F.one_hot(label, N_CLS).float()
-                        mse_loss = crit(out_fr, label_one_hot)
-                        loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / N_T_STEPS
-                    else:
-                        loss = F.cross_entropy(out_fr, label) / N_T_STEPS
-                    loss.backward()
-
-                    if args.online_update:
-                        optimizer.step()
+                if t == 0:
+                    out_fr = net(frame, init=True)
+                    total_fr = out_fr.clone().detach()
+                else:
+                    out_fr = net(frame)
+                    total_fr += out_fr.clone().detach()
+                label_one_hot = F.one_hot(label, N_CLS).float()
+                mse_loss = crit(out_fr, label_one_hot)
+                loss = ((1 - LOSS_LAMBDA) * F.cross_entropy(out_fr, label) + LOSS_LAMBDA * mse_loss) / N_T_STEPS
+                loss.backward()
 
                 batch_loss += loss.item()
                 train_loss += loss.item() * label.numel()
-            if not args.online_update:
-                optimizer.step()
+            optimizer.step()
 
             # measure accuracy and record loss
             prec1, prec5 = accuracy(total_fr.data, label.data, topk=(1, 5))
-            losses.update(batch_loss, input_frame.size(0))
-            top1.update(prec1.item(), input_frame.size(0))
-            top5.update(prec5.item(), input_frame.size(0))
+            losses.update(batch_loss, frame.size(0))
+            top1.update(prec1.item(), frame.size(0))
+            top5.update(prec5.item(), frame.size(0))
 
 
             train_samples += label.numel()
@@ -284,11 +234,9 @@ def main():
             for frame, label in l_te:
                 batch_idx += 1
                 frame = frame.float()
-                label = label
-                #t_step = args.T
                 total_loss = 0
 
-                for t in range(N_T_STEP):
+                for t in range(N_T_STEPS):
                     input_frame = frame
                     if t == 0:
                         out_fr = net(input_frame, init=True)
@@ -296,13 +244,9 @@ def main():
                     else:
                         out_fr = net(input_frame)
                         total_fr += out_fr.clone().detach()
-                        #total_fr = total_fr * (1 - 1. / args.tau) + out_fr
-                    if args.loss_lambda > 0.0:
-                        label_one_hot = F.one_hot(label, n_classes).float()
-                        mse_loss = crit(out_fr, label_one_hot)
-                        loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / N_T_STEP
-                    else:
-                        loss = F.cross_entropy(out_fr, label) / N_T_STEP
+                    label_one_hot = F.one_hot(label, N_CLS).float()
+                    mse_loss = crit(out_fr, label_one_hot)
+                    loss = ((1 - LOSS_LAMBDA) * F.cross_entropy(out_fr, label) + LOSS_LAMBDA * mse_loss) / N_T_STEPS
                     total_loss += loss
 
                 test_samples += label.numel()
@@ -321,16 +265,16 @@ def main():
 
                 # plot progress
                 bar.suffix = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
-                            batch=batch_idx,
-                            size=len(l_te),
-                            data=data_time.avg,
-                            bt=batch_time.avg,
-                            total=bar.elapsed_td,
-                            eta=bar.eta_td,
-                            loss=losses.avg,
-                            top1=top1.avg,
-                            top5=top5.avg,
-                            )
+                    batch=batch_idx,
+                    size=len(l_te),
+                    data=data_time.avg,
+                    bt=batch_time.avg,
+                    total=bar.elapsed_td,
+                    eta=bar.eta_td,
+                    loss=losses.avg,
+                    top1=top1.avg,
+                    top5=top5.avg,
+                )
                 bar.next()
         bar.finish()
 
