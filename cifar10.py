@@ -27,12 +27,8 @@ from torchvision.transforms import (
     ToTensor
 )
 
-
-
 ########################################################################
 
-
-import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -62,6 +58,9 @@ BS = 128
 DATA_DIR = Path('/tmp/data')
 LOG_DIR = Path('./logs')
 
+# Simulation settings
+N_T_STEPS = 6
+
 # Optimization settings
 LR = 0.1
 SGD_MOM = 0.9
@@ -69,11 +68,10 @@ T_MAX=300
 
 def main():
     parser = argparse.ArgumentParser(description='Classify CIFAR')
-    parser.add_argument('-T', default=6, type=int, help='simulating time-steps')
+    #parser.add_argument('-T', default=6, type=int, help='simulating time-steps')
     parser.add_argument('-tau', default=2., type=float)
     parser.add_argument('-j', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
-    parser.add_argument('-resume', type=str, help='resume from the checkpoint path')
     parser.add_argument('-step_size', default=100, type=float, help='step_size for StepLR')
     parser.add_argument('-gamma', default=0.1, type=float, help='gamma for StepLR')
     parser.add_argument('-T_max', default=300, type=int, help='T_max for CosineAnnealingLR')
@@ -82,7 +80,6 @@ def main():
         type = str,
         default = 'online_spiking_vgg11_ws'
     )
-    parser.add_argument('-drop_rate', type=float, default=0.0)
     parser.add_argument('-stochdepth_rate', type=float, default=0.0)
     parser.add_argument('-cnf', type=str)
     parser.add_argument('-T_train', default=None, type=int)
@@ -142,7 +139,7 @@ def main():
         surrogate_function = surrogate.Sigmoid(alpha=4.),
         track_rate = True,
         c_in = 3,
-        neuron_dropout = args.drop_rate,
+        neuron_dropout = 0.0,
         grad_with_rate = True,
         fc_hw = 1,
         v_reset = None
@@ -156,20 +153,10 @@ def main():
     )
 
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=T_MAX)
-    scaler = None
 
-    start_epoch = 0
     max_test_acc = 0
 
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        net.load_state_dict(checkpoint['net'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        start_epoch = checkpoint['epoch'] + 1
-        max_test_acc = checkpoint['max_test_acc']
-
-    out_dir = os.path.join(LOG_DIR, f'{args.model}_{args.cnf}_T_{args.T}_T_train_{args.T_train}_sgd_lr_{LR}_')
+    out_dir = os.path.join(LOG_DIR, f'{args.model}_{args.cnf}_T_6_T_train_{args.T_train}_sgd_lr_{LR}_')
     out_dir += f'CosALR_{T_MAX}'
 
     if not os.path.exists(out_dir):
@@ -187,7 +174,7 @@ def main():
     with open(os.path.join(out_dir, 'args.txt'), 'w', encoding='utf-8') as args_txt:
         args_txt.write(str(args))
 
-    writer = SummaryWriter(os.path.join(out_dir, 'logs'), purge_step=start_epoch)
+    writer = SummaryWriter(os.path.join(out_dir, 'logs'), purge_step=0)
 
     crit = MSELoss()
 
@@ -211,14 +198,12 @@ def main():
         for frame, label in l_tr:
             batch_idx += 1
             frame = frame.float()
-            t_step = args.T
-
-            label = label
+            #t_step = args.T
 
             batch_loss = 0
             if not args.online_update:
                 optimizer.zero_grad()
-            for t in range(t_step):
+            for t in range(N_T_STEPS):
                 if args.online_update:
                     optimizer.zero_grad()
                 input_frame = frame
@@ -229,13 +214,12 @@ def main():
                     else:
                         out_fr = net(input_frame)
                         total_fr += out_fr.clone().detach()
-                        #total_fr = total_fr * (1 - 1. / args.tau) + out_fr
                     if args.loss_lambda > 0.0:
                         label_one_hot = F.one_hot(label, N_CLS).float()
                         mse_loss = crit(out_fr, label_one_hot)
-                        loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / t_step
+                        loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / N_T_STEPS
                     else:
-                        loss = F.cross_entropy(out_fr, label) / t_step
+                        loss = F.cross_entropy(out_fr, label) / N_T_STEPS
                     loss.backward()
 
                     if args.online_update:
@@ -301,10 +285,10 @@ def main():
                 batch_idx += 1
                 frame = frame.float()
                 label = label
-                t_step = args.T
+                #t_step = args.T
                 total_loss = 0
 
-                for t in range(t_step):
+                for t in range(N_T_STEP):
                     input_frame = frame
                     if t == 0:
                         out_fr = net(input_frame, init=True)
@@ -316,9 +300,9 @@ def main():
                     if args.loss_lambda > 0.0:
                         label_one_hot = F.one_hot(label, n_classes).float()
                         mse_loss = crit(out_fr, label_one_hot)
-                        loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / t_step
+                        loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / N_T_STEP
                     else:
-                        loss = F.cross_entropy(out_fr, label) / t_step
+                        loss = F.cross_entropy(out_fr, label) / N_T_STEP
                     total_loss += loss
 
                 test_samples += label.numel()
@@ -336,7 +320,7 @@ def main():
                 end = time.time()
 
                 # plot progress
-                bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+                bar.suffix = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
                             batch=batch_idx,
                             size=len(l_te),
                             data=data_time.avg,
