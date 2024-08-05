@@ -62,16 +62,16 @@ class OnlineIFNode(IFNode):
 
 class OnlineLIFNode(LIFNode):
     def __init__(
-            self,
-            tau: float = 2.,
-            decay_input: bool = False,
-            v_threshold: float = 1.,
-            v_reset: float = None,
-            surrogate_function: Callable = surrogate.Sigmoid(),
-            detach_reset: bool = True,
-            track_rate: bool = True,
-            neuron_dropout: float = 0.0,
-            **kwargs
+        self,
+        tau: float = 2.,
+        decay_input: bool = False,
+        v_threshold: float = 1.,
+        v_reset: float = None,
+        surrogate_function: Callable = surrogate.Sigmoid(),
+        detach_reset: bool = True,
+        track_rate: bool = True,
+        neuron_dropout: float = 0.0,
+        **kwargs
     ):
         super().__init__(tau, decay_input, v_threshold, v_reset, surrogate_function, detach_reset)
         self.track_rate = track_rate

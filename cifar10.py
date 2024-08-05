@@ -1,21 +1,18 @@
 import datetime
-import os
 import time
 import torch
 
 from itertools import islice
 from pathlib import Path
-from modules.neuron import OnlineLIFNode
 from modules.surrogate import Sigmoid
-
-from torchinfo import summary
 
 from torch.nn import MSELoss
 from torch.optim import SGD
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from torch.utils.data import DataLoader
-from torch.utils.data import DataLoader
+
+from torchinfo import summary
 
 from torchtoolbox.transform import Cutout
 
@@ -31,16 +28,13 @@ from torchvision.transforms import (
 
 import torch.nn.functional as F
 from models import spiking_vgg
-from utils import Bar, Logger, AverageMeter, accuracy
+from utils import Bar, Logger, AverageMeter
 
 _seed_ = 2022
 import random
 random.seed(_seed_)
 
 torch.manual_seed(_seed_)
-torch.cuda.manual_seed_all(_seed_)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
 
 import numpy as np
 np.random.seed(_seed_)
@@ -125,33 +119,17 @@ def main():
 
     max_test_acc = 0
 
-    out_dir = os.path.join(LOG_DIR, f'basic')
-
-    if not os.path.exists(out_dir):
-        os.makedirs(out_dir)
-        print(f'Mkdir {out_dir}.')
-    else:
-        print(out_dir)
-
-    pt_dir = out_dir + '_pt'
-    if not os.path.exists(pt_dir):
-        os.makedirs(pt_dir)
-        print(f'Mkdir {pt_dir}.')
-
-    writer = SummaryWriter(os.path.join(out_dir, 'logs'), purge_step=0)
+    writer = SummaryWriter(LOG_DIR / 'logs', purge_step=0)
 
     crit = MSELoss()
 
     for epoch in range(N_EPOCHS):
-        start_time = time.time()
         net.train()
 
         batch_time = AverageMeter()
         data_time = AverageMeter()
         losses = AverageMeter()
-        top1 = AverageMeter()
-        top5 = AverageMeter()
-        end = time.time()
+        start_time = time.time()
 
         bar = Bar('Processing', max=len(l_tr))
 
@@ -180,31 +158,22 @@ def main():
                 train_loss += loss.item() * label.numel()
             optimizer.step()
 
-            # measure accuracy and record loss
-            prec1, prec5 = accuracy(total_fr.data, label.data, topk=(1, 5))
             losses.update(batch_loss, frame.size(0))
-            top1.update(prec1.item(), frame.size(0))
-            top5.update(prec5.item(), frame.size(0))
-
 
             train_samples += label.numel()
             train_acc += (total_fr.argmax(1) == label).float().sum().item()
 
             # measure elapsed time
-            batch_time.update(time.time() - end)
+            batch_time.update(time.time() - start_time)
             end = time.time()
 
-            # plot progress
-            bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+            bar.suffix  = '({batch}/{size}) Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f}'.format(
                 batch=batch_idx,
                 size=len(l_tr),
-                data=data_time.avg,
                 bt=batch_time.avg,
                 total=bar.elapsed_td,
                 eta=bar.eta_td,
                 loss=losses.avg,
-                top1=top1.avg,
-                top5=top5.avg,
             )
             bar.next()
         bar.finish()
@@ -221,8 +190,6 @@ def main():
         batch_time = AverageMeter()
         data_time = AverageMeter()
         losses = AverageMeter()
-        top1 = AverageMeter()
-        top5 = AverageMeter()
         end = time.time()
         bar = Bar('Processing', max=len(l_te))
 
@@ -253,27 +220,20 @@ def main():
                 test_loss += total_loss.item() * label.numel()
                 test_acc += (total_fr.argmax(1) == label).float().sum().item()
 
-                # measure accuracy and record loss
-                prec1, prec5 = accuracy(total_fr.data, label.data, topk=(1, 5))
                 losses.update(total_loss, input_frame.size(0))
-                top1.update(prec1.item(), input_frame.size(0))
-                top5.update(prec5.item(), input_frame.size(0))
 
                 # measure elapsed time
                 batch_time.update(time.time() - end)
                 end = time.time()
 
                 # plot progress
-                bar.suffix = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
+                bar.suffix = '({batch}/{size}) Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f}'.format(
                     batch=batch_idx,
                     size=len(l_te),
-                    data=data_time.avg,
                     bt=batch_time.avg,
                     total=bar.elapsed_td,
                     eta=bar.eta_td,
                     loss=losses.avg,
-                    top1=top1.avg,
-                    top5=top5.avg,
                 )
                 bar.next()
         bar.finish()
@@ -297,9 +257,9 @@ def main():
         }
 
         if save_max:
-            torch.save(checkpoint, os.path.join(pt_dir, 'checkpoint_max.pth'))
+            torch.save(checkpoint, LOG_DIR / 'checkpoint_max.pth')
 
-        torch.save(checkpoint, os.path.join(pt_dir, 'checkpoint_latest.pth'))
+        torch.save(checkpoint, LOG_DIR / 'checkpoint_latest.pth')
 
         total_time = time.time() - start_time
         print(f'epoch={epoch}, train_loss={train_loss}, train_acc={train_acc}, test_loss={test_loss}, test_acc={test_acc}, max_test_acc={max_test_acc}, total_time={total_time}, escape_time={(datetime.datetime.now()+datetime.timedelta(seconds=total_time * (N_EPOCHS - epoch))).strftime("%Y-%m-%d %H:%M:%S")}')

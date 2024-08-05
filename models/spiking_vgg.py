@@ -3,19 +3,26 @@ import torch.nn as nn
 import numpy as np
 from modules.neuron import OnlineLIFNode
 from torch.nn import (
+    AdaptiveAvgPool2d,
+    AvgPool2d,
+    BatchNorm2d,
+    Conv2d,
     Linear,
-    Module
+    Module,
+    Sequential
 )
 import torch.nn.functional as F
 from torch.autograd import Function
 
-__all__ = [
-    'OnlineSpikingVGG', 'online_spiking_vgg11', 'online_spiking_vgg11_ws', 'online_spiking_vgg11f_ws',
-]
+# __all__ = [
+#     'OnlineSpikingVGG',
+#     'online_spiking_vgg11', 'online_spiking_vgg11_ws',
+#     'online_spiking_vgg11f_ws',
+# ]
 
 # modified by https://github.com/pytorch/vision/blob/main/torchvision/models/vgg.py
 
-class ScaledWSConv2d(nn.Conv2d):
+class ScaledWSConv2d(Conv2d):
 
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, gain=True, eps=1e-4):
         super(ScaledWSConv2d, self).__init__(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias)
@@ -38,7 +45,7 @@ class ScaledWSConv2d(nn.Conv2d):
         return F.conv2d(x, self.get_weight(), self.bias, self.stride, self.padding, self.dilation, self.groups)
 
 
-class ScaledWSLinear(nn.Linear):
+class ScaledWSLinear(Linear):
 
     def __init__(self, in_features, out_features, bias=True, gain=True, eps=1e-4):
         super(ScaledWSLinear, self).__init__(in_features, out_features, bias)
@@ -71,7 +78,7 @@ class Replace(Function):
         return (grad, grad)
 
 
-class WrapedSNNOp(nn.Module):
+class WrapedSNNOp(Module):
 
     def __init__(self, op):
         super(WrapedSNNOp, self).__init__()
@@ -93,7 +100,7 @@ class WrapedSNNOp(nn.Module):
             return self.op(x)
 
 
-class SequentialModule(nn.Sequential):
+class SequentialModule(Sequential):
 
     def __init__(self, *args):
         super(SequentialModule, self).__init__(*args)
@@ -115,7 +122,7 @@ class SequentialModule(nn.Sequential):
         return spikes
 
 
-class Scale(nn.Module):
+class Scale(Module):
 
     def __init__(self, scale):
         super(Scale, self).__init__()
@@ -129,36 +136,20 @@ from rich import print as rprint
 
 N_CLS = 10
 
-class OnlineSpikingVGG(nn.Module):
-
+class OnlineSpikingVGG(Module):
     def __init__(
-            self,
-            weight_standardization=True,
-            init_weights=True,
-            light_classifier=True,
-            BN=False,
-            **kwargs
+        self,
+        **kwargs
     ):
         super(OnlineSpikingVGG, self).__init__()
-
-
-
-        self.grad_with_rate = kwargs.get('grad_with_rate', False)
         self.fc_hw = kwargs.get('fc_hw', 3)
         self.features = self.make_layers(
-            #cfg=cfg,
-            weight_standardization=weight_standardization,
             neuron=OnlineLIFNode,
-            BN=BN,
             **kwargs
         )
 
         params = [
             ('fc_hw', self.fc_hw),
-            ('grad_with_rate', self.grad_with_rate),
-            ('init_weights', init_weights),
-            ('light_classifier', light_classifier),
-            #('single_step_neuron', single_step_neuron)
         ]
 
         tab = Table('Parameter', 'Value', title = 'Parameters')
@@ -167,52 +158,28 @@ class OnlineSpikingVGG(nn.Module):
         rprint(tab)
 
 
-        if light_classifier:
-            self.avgpool = nn.AdaptiveAvgPool2d((self.fc_hw, self.fc_hw))
-            if self.grad_with_rate:
-                self.classifier = SequentialModule(
-                    WrapedSNNOp(Linear(512*(self.fc_hw**2), 10)),
-                )
-            else:
-                self.classifier = SequentialModule(
-                    Linear(512*(self.fc_hw**2), n_classes),
-                )
-        else:
-            self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
-            if self.grad_with_rate:
-                self.classifier = SequentialModule(
-                    WrapedSNNOp(ScaledWSLinear(512 * 7 * 7, 4096)),
-                    OnlineLIFNode(**kwargs, neuron_dropout=0.0),
-                    Scale(2.74),
-                    nn.Dropout(),
-                    WrapedSNNOp(ScaledWSLinear(4096, 4096)),
-                    OnlineLIFNode(**kwargs, neuron_dropout=0.0),
-                    Scale(2.74),
-                    Dropout(),
-                    WrapedSNNOp(nn.Linear(4096, n_classes)),
-                )
-            else:
-                self.classifier = SequentialModule(
-                    ScaledWSLinear(512 * 7 * 7, 4096),
-                    OnlineLIFNode(**kwargs, neuron_dropout=0.0),
-                    Scale(2.74),
-                    Dropout(),
-                    ScaledWSLinear(4096, 4096),
-                    OnlineLIFNode(**kwargs, neuron_dropout=0.0),
-                    Scale(2.74),
-                    Dropout(),
-                    Linear(4096, n_classes),
-                )
-        if init_weights:
-            self._initialize_weights()
+        self.avgpool = AdaptiveAvgPool2d((self.fc_hw, self.fc_hw))
+        self.classifier = SequentialModule(
+            WrapedSNNOp(Linear(512*(self.fc_hw**2), N_CLS)),
+        )
+        self._initialize_weights()
 
     def forward(self, x, **kwargs):
-        require_wrap = self.grad_with_rate and self.training
-        if require_wrap:
-            x = self.features(x, output_type='spike_rate', require_wrap=True, **kwargs)
+        if self.training:
+            x = self.features(
+                x,
+                output_type='spike_rate',
+                require_wrap=True,
+                **kwargs
+            )
             x = self.avgpool(x)
             x = torch.flatten(x, 1)
-            x = self.classifier(x, output_type='spike_rate', require_wrap=True, **kwargs)
+            x = self.classifier(
+                x,
+                output_type='spike_rate',
+                require_wrap=True,
+                **kwargs
+            )
         else:
             x = self.features(x, require_wrap=False, **kwargs)
             x = self.avgpool(x)
@@ -222,35 +189,39 @@ class OnlineSpikingVGG(nn.Module):
 
     def _initialize_weights(self):
         for m in self.modules():
-            if isinstance(m, nn.Conv2d) or isinstance(m, ScaledWSConv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            if isinstance(m, Conv2d) or isinstance(m, ScaledWSConv2d):
+                nn.init.kaiming_normal_(
+                    m.weight,
+                    mode='fan_out',
+                    nonlinearity='relu'
+                )
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm2d):
+            elif isinstance(m, BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
+            elif isinstance(m, Linear):
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
 
     @staticmethod
     def make_layers(
-            #cfg,
-            weight_standardization=True,
-            neuron: callable = None,
-            BN=False, **kwargs
+        neuron: callable = None,
+        **kwargs
     ):
         grad_with_rate = kwargs.get('grad_with_rate', False)
+        assert grad_with_rate
+        assert neuron == OnlineLIFNode
         layers = []
         in_channels = kwargs.get('c_in', 3)
         first_conv = True
         use_stride_2 = False
 
-        # We only support one VGG size
+        # Only one VGG arch
         cfg = [64, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512]
         for v in cfg:
             if v == 'M':
-                layers += [nn.AvgPool2d(kernel_size=2, stride=2)]
+                layers += [AvgPool2d(kernel_size=2, stride=2)]
             elif v == 'S':
                 use_stride_2 = True
             else:
@@ -259,56 +230,30 @@ class OnlineSpikingVGG(nn.Module):
                     use_stride_2 = False
                 else:
                     stride = 1
-                if weight_standardization:
+                if True:
                     if first_conv:
                         conv2d = ScaledWSConv2d(in_channels, v, kernel_size=3, padding=1, stride=stride)
                         first_conv = False
                     else:
-                        if grad_with_rate:
-                            conv2d = WrapedSNNOp(ScaledWSConv2d(in_channels, v, kernel_size=3, padding=1, stride=stride))
-                        else:
-                            conv2d = ScaledWSConv2d(in_channels, v, kernel_size=3, padding=1, stride=stride)
-                    layers += [conv2d, neuron(**kwargs), Scale(2.74)]
-                else:
-                    if first_conv:
-                        conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1, stride=stride)
-                        first_conv = False
-                    else:
-                        if grad_with_rate:
-                            conv2d = WrapedSNNOp(nn.Conv2d(in_channels, v, kernel_size=3, padding=1, stride=stride))
-                        else:
-                            conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1, stride=stride)
-                    if BN:
-                        bn = nn.BatchNorm2d(v)
-                        layers += [conv2d, bn, neuron(**kwargs)]
-                    else:
-                        layers += [conv2d, neuron(**kwargs), Scale(2.74)]
+                        conv2d = WrapedSNNOp(
+                            ScaledWSConv2d(in_channels, v, kernel_size=3, padding=1, stride=stride)
+                        )
+                layers += [conv2d, OnlineLIFNode(**kwargs), Scale(2.74)]
                 in_channels = v
         return SequentialModule(*layers)
 
     def get_spike(self):
         return self.features.get_spike()
 
-
-
-# cfgs = {
-#     'A': [64, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512],
-# }
-
-
 def _spiking_vgg(
         arch,
         cfg,
-        weight_standardization,
         pretrained,
         progress,
         **kwargs):
     if pretrained:
         kwargs['init_weights'] = False
-    # We only support one VGG sizem
-    #cfg = [64, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512]
     model = OnlineSpikingVGG(
-        weight_standardization=weight_standardization,
         **kwargs
     )
     if pretrained:
@@ -318,21 +263,13 @@ def _spiking_vgg(
     return model
 
 
-# def online_spiking_vgg11(
-#         pretrained=False,
-#         progress=True,
-#         **kwargs
-# ):
-#     return _spiking_vgg('vgg11', 'A', False, pretrained, progress, **kwargs)
-
-
 def online_spiking_vgg11_ws(
         pretrained = False,
         progress = True,
         **kwargs
 ):
     return _spiking_vgg(
-        'vgg11', 'A', True, pretrained,
+        'vgg11', 'A', pretrained,
         progress,
         **kwargs
     )
