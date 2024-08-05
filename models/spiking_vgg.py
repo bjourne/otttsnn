@@ -124,6 +124,7 @@ class Scale(nn.Module):
 from rich.table import Table
 from rich import print as rprint
 
+N_CLS = 10
 
 class OnlineSpikingVGG(nn.Module):
 
@@ -131,7 +132,6 @@ class OnlineSpikingVGG(nn.Module):
             self,
             cfg,
             weight_standardization=True,
-            n_classes=1000,
             init_weights=True,
             single_step_neuron: callable = None,
             light_classifier=True,
@@ -149,12 +149,10 @@ class OnlineSpikingVGG(nn.Module):
                                          neuron=single_step_neuron, BN=BN, **kwargs)
 
         params = [
-
             ('fc_hw', self.fc_hw),
             ('grad_with_rate', self.grad_with_rate),
             ('init_weights', init_weights),
             ('light_classifier', light_classifier),
-            ('n_classes', n_classes),
             ('single_step_neuron', single_step_neuron)
         ]
 
@@ -164,13 +162,12 @@ class OnlineSpikingVGG(nn.Module):
         rprint(tab)
 
 
-
         if light_classifier:
             self.avgpool = nn.AdaptiveAvgPool2d((self.fc_hw, self.fc_hw))
             if self.grad_with_rate:
                 self.classifier = SequentialModule(
                     single_step_neuron, # not in the module, but parameter
-                    WrapedSNNOp(nn.Linear(512*(self.fc_hw**2), n_classes)),
+                    WrapedSNNOp(nn.Linear(512*(self.fc_hw**2), 10)),
                 )
             else:
                 self.classifier = SequentialModule(
