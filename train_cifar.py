@@ -2,12 +2,20 @@ import datetime
 import os
 import time
 import torch
+
+from itertools import islice
+from torchinfo import summary
+from torchview import draw_graph
+
 from torch.utils.data import DataLoader
 
 import torch.nn as nn
 import torch.nn.functional as F
 
+from torch.nn import MSELoss
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DataLoader
+
 import sys
 from torch.cuda import amp
 from models import spiking_vgg
@@ -16,6 +24,7 @@ import argparse
 import math
 from utils import Bar, Logger, AverageMeter, accuracy, mkdir_p, savefig
 import torch.utils.data as data
+from torchvision.transforms import Compose, RandomCrop
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 from torchtoolbox.transform import Cutout
@@ -42,7 +51,7 @@ def main():
                         help='number of total epochs to run')
     parser.add_argument('-j', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
-    parser.add_argument('-data_dir', type=str, default=None)
+    parser.add_argument('-data_dir', type = str, default=None)
     parser.add_argument('-dataset', default='cifar10', type=str)
     parser.add_argument('-out_dir', type=str, help='root dir for saving logs and checkpoint', default='./logs')
 
@@ -56,7 +65,11 @@ def main():
     parser.add_argument('-step_size', default=100, type=float, help='step_size for StepLR')
     parser.add_argument('-gamma', default=0.1, type=float, help='gamma for StepLR')
     parser.add_argument('-T_max', default=300, type=int, help='T_max for CosineAnnealingLR')
-    parser.add_argument('-model', type=str, default='online_spiking_vgg11_ws')
+    parser.add_argument(
+        '-model',
+        type = str,
+        default = 'online_spiking_vgg11_ws'
+    )
     parser.add_argument('-drop_rate', type=float, default=0.0)
     parser.add_argument('-stochdepth_rate', type=float, default=0.0)
     parser.add_argument('-weight_decay', type=float, default=0.0)
@@ -69,41 +82,69 @@ def main():
     parser.add_argument('-gpu-id', default='0', type=str, help='gpu id')
 
     args = parser.parse_args()
-    #print(args)
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_id
 
-    transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
+    trans_tr = Compose([
+        RandomCrop(32, padding=4),
         Cutout(),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
 
-    transform_test = transforms.Compose([
+    trans_te = Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
     if args.dataset == 'cifar10':
-        dataloader = datasets.CIFAR10
-        num_classes = 10
+        dataset = datasets.CIFAR10
+        n_classes = 10
     else:
-        dataloader = datasets.CIFAR100
-        num_classes = 100
+        dataset = datasets.CIFAR100
+        n_classes = 100
 
 
-    trainset = dataloader(root=args.data_dir, train=True, download=True, transform=transform_train)
-    train_data_loader = data.DataLoader(trainset, batch_size=args.b, shuffle=True, num_workers=args.j)
+    trainset = dataset(
+        root=args.data_dir,
+        train=True,
+        download=True,
+        transform=trans_tr
+    )
+    l_tr = DataLoader(
+        trainset,
+        batch_size=args.b,
+        shuffle=True,
+        num_workers=args.j
+    )
 
-    testset = dataloader(root=args.data_dir, train=False, download=False, transform=transform_test)
-    test_data_loader = data.DataLoader(testset, batch_size=args.b, shuffle=False, num_workers=args.j)
+    testset = dataset(root=args.data_dir, train=False, download=False, transform=trans_te)
+    l_te = DataLoader(testset, batch_size=args.b, shuffle=False, num_workers=args.j)
 
-    #net = spiking_vgg.__dict__[args.model](single_step_neuron=neuron.OnlineLIFNode, tau=args.tau, surrogate_function=surrogate.QuasiClamp(alpha=1.), track_rate=True, c_in=3, num_classes=num_classes, neuron_dropout=args.drop_rate, grad_with_rate=True, fc_hw=1, v_reset=None)
-    net = spiking_vgg.__dict__[args.model](single_step_neuron=neuron.OnlineLIFNode, tau=args.tau, surrogate_function=surrogate.Sigmoid(alpha=4.), track_rate=True, c_in=3, num_classes=num_classes, neuron_dropout=args.drop_rate, grad_with_rate=True, fc_hw=1, v_reset=None)
-    #print(net)
+    #net = spiking_vgg.__dict__[args.model](single_step_neuron=neuron.OnlineLIFNode, tau=args.tau, surrogate_function=surrogate.QuasiClamp(alpha=1.), track_rate=True, c_in=3, n_classes=n_classes, neuron_dropout=args.drop_rate, grad_with_rate=True, fc_hw=1, v_reset=None)
+
+    model_name = args.model
+    model = spiking_vgg.__dict__[model_name]
+    print(model)
+    net = model(
+        single_step_neuron = neuron.OnlineLIFNode,
+        tau = args.tau,
+        surrogate_function = surrogate.Sigmoid(alpha=4.),
+        track_rate = True,
+        c_in = 3,
+        n_classes = n_classes,
+        neuron_dropout = args.drop_rate,
+        grad_with_rate = True,
+        fc_hw = 1,
+        v_reset = None
+    )
     print('Total Parameters: %.2fM' % (sum(p.numel() for p in net.parameters()) / 1000000.0))
-    net.cuda()
 
+    return
+
+    # x = torch.rand(128, 3, 32, 32)
+    # net(x, init = True)
+    # g = draw_graph(net, input_size = (128, 3, 32, 32), expand_nested = True, device = 'cpu', depth = 2)
+    # open('test.dot', 'wt').write(str(g.visual_graph))
 
     optimizer = None
     if args.opt == 'SGD':
@@ -165,8 +206,8 @@ def main():
         args_txt.write(str(args))
 
     writer = SummaryWriter(os.path.join(out_dir, 'logs'), purge_step=start_epoch)
-    
-    criterion_mse = nn.MSELoss(reduce=True)
+
+    crit = MSELoss(reduce=True)
 
     for epoch in range(start_epoch, args.epochs):
         start_time = time.time()
@@ -179,18 +220,18 @@ def main():
         top5 = AverageMeter()
         end = time.time()
 
-        bar = Bar('Processing', max=len(train_data_loader))
+        bar = Bar('Processing', max=len(l_tr))
 
         train_loss = 0
         train_acc = 0
         train_samples = 0
         batch_idx = 0
-        for frame, label in train_data_loader:
+        for frame, label in l_tr:
             batch_idx += 1
-            frame = frame.float().cuda()
+            frame = frame.float()
             t_step = args.T
 
-            label = label.cuda()
+            label = label
 
             batch_loss = 0
             if not args.online_update:
@@ -209,8 +250,8 @@ def main():
                             total_fr += out_fr.clone().detach()
                             #total_fr = total_fr * (1 - 1. / args.tau) + out_fr
                         if args.loss_lambda > 0.0:
-                            label_one_hot = F.one_hot(label, num_classes).float()
-                            mse_loss = criterion_mse(out_fr, label_one_hot)
+                            label_one_hot = F.one_hot(label, n_classes).float()
+                            mse_loss = crit(out_fr, label_one_hot)
                             loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / t_step
                         else:
                             loss = F.cross_entropy(out_fr, label) / t_step
@@ -228,8 +269,8 @@ def main():
                         total_fr += out_fr.clone().detach()
                         #total_fr = total_fr * (1 - 1. / args.tau) + out_fr
                     if args.loss_lambda > 0.0:
-                        label_one_hot = F.one_hot(label, num_classes).float()
-                        mse_loss = criterion_mse(out_fr, label_one_hot)
+                        label_one_hot = F.one_hot(label, n_classes).float()
+                        mse_loss = crit(out_fr, label_one_hot)
                         loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / t_step
                     else:
                         loss = F.cross_entropy(out_fr, label) / t_step
@@ -264,7 +305,7 @@ def main():
             # plot progress
             bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
                         batch=batch_idx,
-                        size=len(train_data_loader),
+                        size=len(l_tr),
                         data=data_time.avg,
                         bt=batch_time.avg,
                         total=bar.elapsed_td,
@@ -291,17 +332,17 @@ def main():
         top1 = AverageMeter()
         top5 = AverageMeter()
         end = time.time()
-        bar = Bar('Processing', max=len(test_data_loader))
+        bar = Bar('Processing', max=len(l_te))
 
         test_loss = 0
         test_acc = 0
         test_samples = 0
         batch_idx = 0
         with torch.no_grad():
-            for frame, label in test_data_loader:
+            for frame, label in l_te:
                 batch_idx += 1
-                frame = frame.float().cuda()
-                label = label.cuda()
+                frame = frame.float()
+                label = label
                 t_step = args.T
                 total_loss = 0
 
@@ -315,8 +356,8 @@ def main():
                         total_fr += out_fr.clone().detach()
                         #total_fr = total_fr * (1 - 1. / args.tau) + out_fr
                     if args.loss_lambda > 0.0:
-                        label_one_hot = F.one_hot(label, num_classes).float()
-                        mse_loss = criterion_mse(out_fr, label_one_hot)
+                        label_one_hot = F.one_hot(label, n_classes).float()
+                        mse_loss = crit(out_fr, label_one_hot)
                         loss = ((1 - args.loss_lambda) * F.cross_entropy(out_fr, label) + args.loss_lambda * mse_loss) / t_step
                     else:
                         loss = F.cross_entropy(out_fr, label) / t_step
@@ -339,7 +380,7 @@ def main():
                 # plot progress
                 bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f} | top1: {top1: .4f} | top5: {top5: .4f}'.format(
                             batch=batch_idx,
-                            size=len(test_data_loader),
+                            size=len(l_te),
                             data=data_time.avg,
                             bt=batch_time.avg,
                             total=bar.elapsed_td,
@@ -373,11 +414,7 @@ def main():
             torch.save(checkpoint, os.path.join(pt_dir, 'checkpoint_max.pth'))
 
         torch.save(checkpoint, os.path.join(pt_dir, 'checkpoint_latest.pth'))
-        #for item in sys.argv:
-        #    print(item, end=' ')
-        #print('')
-        #print(args)
-        #print(out_dir)
+
         total_time = time.time() - start_time
         print(f'epoch={epoch}, train_loss={train_loss}, train_acc={train_acc}, test_loss={test_loss}, test_acc={test_acc}, max_test_acc={max_test_acc}, total_time={total_time}, escape_time={(datetime.datetime.now()+datetime.timedelta(seconds=total_time * (args.epochs - epoch))).strftime("%Y-%m-%d %H:%M:%S")}')
 

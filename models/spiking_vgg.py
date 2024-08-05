@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from torch.nn import Module
 import torch.nn.functional as F
 from torch.autograd import Function
 
@@ -120,28 +121,61 @@ class Scale(nn.Module):
     def forward(self, x, **kwargs):
         return x * self.scale
 
+from rich.table import Table
+from rich import print as rprint
+
 
 class OnlineSpikingVGG(nn.Module):
 
-    def __init__(self, cfg, weight_standardization=True, num_classes=1000, init_weights=True,
-                 single_step_neuron: callable = None, light_classifier=True, BN=False, **kwargs):
+    def __init__(
+            self,
+            cfg,
+            weight_standardization=True,
+            n_classes=1000,
+            init_weights=True,
+            single_step_neuron: callable = None,
+            light_classifier=True,
+            BN=False,
+            **kwargs
+    ):
         super(OnlineSpikingVGG, self).__init__()
+
+
+
         self.single_step_neuron = single_step_neuron
         self.grad_with_rate = kwargs.get('grad_with_rate', False)
         self.fc_hw = kwargs.get('fc_hw', 3)
         self.features = self.make_layers(cfg=cfg, weight_standardization=weight_standardization,
                                          neuron=single_step_neuron, BN=BN, **kwargs)
+
+        params = [
+
+            ('fc_hw', self.fc_hw),
+            ('grad_with_rate', self.grad_with_rate),
+            ('init_weights', init_weights),
+            ('light_classifier', light_classifier),
+            ('n_classes', n_classes),
+            ('single_step_neuron', single_step_neuron)
+        ]
+
+        tab = Table('Parameter', 'Value', title = 'Parameters')
+        for n, v in params:
+            tab.add_row(n, str(v))
+        rprint(tab)
+
+
+
         if light_classifier:
             self.avgpool = nn.AdaptiveAvgPool2d((self.fc_hw, self.fc_hw))
             if self.grad_with_rate:
                 self.classifier = SequentialModule(
                     single_step_neuron, # not in the module, but parameter
-                    WrapedSNNOp(nn.Linear(512*(self.fc_hw**2), num_classes)),
+                    WrapedSNNOp(nn.Linear(512*(self.fc_hw**2), n_classes)),
                 )
             else:
                 self.classifier = SequentialModule(
                     single_step_neuron, # not in the module, but parameter
-                    nn.Linear(512*(self.fc_hw**2), num_classes),
+                    nn.Linear(512*(self.fc_hw**2), n_classes),
                 )
         else:
             self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
@@ -156,7 +190,7 @@ class OnlineSpikingVGG(nn.Module):
                     single_step_neuron(**kwargs, neuron_dropout=0.0),
                     Scale(2.74),
                     nn.Dropout(),
-                    WrapedSNNOp(nn.Linear(4096, num_classes)),
+                    WrapedSNNOp(nn.Linear(4096, n_classes)),
                 )
             else:
                 self.classifier = SequentialModule(
@@ -169,7 +203,7 @@ class OnlineSpikingVGG(nn.Module):
                     single_step_neuron(**kwargs, neuron_dropout=0.0),
                     Scale(2.74),
                     nn.Dropout(),
-                    nn.Linear(4096, num_classes),
+                    nn.Linear(4096, n_classes),
                 )
         if init_weights:
             self._initialize_weights()
@@ -202,7 +236,12 @@ class OnlineSpikingVGG(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     @staticmethod
-    def make_layers(cfg, weight_standardization=True, neuron: callable = None, BN=False, **kwargs):
+    def make_layers(
+            cfg,
+            weight_standardization=True,
+            neuron: callable = None,
+            BN=False, **kwargs
+    ):
         grad_with_rate = kwargs.get('grad_with_rate', False)
         layers = []
         in_channels = kwargs.get('c_in', 3)
@@ -257,10 +296,22 @@ cfgs = {
 }
 
 
-def _spiking_vgg(arch, cfg, weight_standardization, pretrained, progress, single_step_neuron: callable = None, **kwargs):
+def _spiking_vgg(
+        arch,
+        cfg,
+        weight_standardization,
+        pretrained,
+        progress,
+        single_step_neuron: callable = None,
+        **kwargs):
     if pretrained:
         kwargs['init_weights'] = False
-    model = OnlineSpikingVGG(cfg=cfgs[cfg], weight_standardization=weight_standardization, single_step_neuron=single_step_neuron, **kwargs)
+    model = OnlineSpikingVGG(
+        cfg=cfgs[cfg],
+        weight_standardization=weight_standardization,
+        single_step_neuron=single_step_neuron,
+        **kwargs
+    )
     if pretrained:
         state_dict = load_state_dict_from_url(model_urls[arch],
                                               progress=progress)
@@ -268,25 +319,49 @@ def _spiking_vgg(arch, cfg, weight_standardization, pretrained, progress, single
     return model
 
 
-def online_spiking_vgg11(pretrained=False, progress=True, single_step_neuron: callable = None, **kwargs):
+def online_spiking_vgg11(
+        pretrained=False,
+        progress=True,
+        single_step_neuron: callable = None,
+        **kwargs
+):
     return _spiking_vgg('vgg11', 'A', False, pretrained, progress, single_step_neuron, **kwargs)
 
 
-def online_spiking_vgg11_ws(pretrained=False, progress=True, single_step_neuron: callable = None, **kwargs):
+def online_spiking_vgg11_ws(
+        pretrained = False,
+        progress = True,
+        single_step_neuron: callable = None,
+        **kwargs
+):
     return _spiking_vgg('vgg11', 'A', True, pretrained, progress, single_step_neuron, **kwargs)
 
 
 
-class OnlineSpikingVGGF(nn.Module):
+class OnlineSpikingVGGF(Module):
 
-    def __init__(self, cfg, weight_standardization=True, num_classes=1000, init_weights=True,
-                 single_step_neuron: callable = None, light_classifier=True, BN=False, **kwargs):
+    def __init__(
+            self,
+            cfg,
+            weight_standardization=True,
+            n_classes=1000,
+            init_weights=True,
+            single_step_neuron: callable = None,
+            light_classifier=True,
+            BN=False,
+            **kwargs
+    ):
         super(OnlineSpikingVGGF, self).__init__()
         self.single_step_neuron = single_step_neuron
         self.grad_with_rate = kwargs.get('grad_with_rate', False)
         self.fc_hw = kwargs.get('fc_hw', 3)
-        self.conv1, self.features = self.make_layers(cfg=cfg, weight_standardization=weight_standardization,
-                                         neuron=single_step_neuron, BN=BN, **kwargs)
+        self.conv1, self.features = self.make_layers(
+            cfg=cfg,
+            weight_standardization=weight_standardization,
+            neuron=single_step_neuron,
+            BN=BN,
+            **kwargs
+        )
 
         # feedback connections
         scale_factor = 1
@@ -305,12 +380,12 @@ class OnlineSpikingVGGF(nn.Module):
             if self.grad_with_rate:
                 self.classifier = SequentialModule(
                     single_step_neuron, # not in the module, but parameter
-                    WrapedSNNOp(nn.Linear(512*(self.fc_hw**2), num_classes)),
+                    WrapedSNNOp(nn.Linear(512*(self.fc_hw**2), n_classes)),
                 )
             else:
                 self.classifier = SequentialModule(
                     single_step_neuron, # not in the module, but parameter
-                    nn.Linear(512*(self.fc_hw**2), num_classes),
+                    nn.Linear(512*(self.fc_hw**2), n_classes),
                 )
         else:
             self.avgpool = nn.AdaptiveAvgPool2d((7, 7))
@@ -325,7 +400,7 @@ class OnlineSpikingVGGF(nn.Module):
                     single_step_neuron(**kwargs, neuron_dropout=0.0),
                     Scale(2.74),
                     nn.Dropout(),
-                    WrapedSNNOp(nn.Linear(4096, num_classes)),
+                    WrapedSNNOp(nn.Linear(4096, n_classes)),
                 )
             else:
                 self.classifier = SequentialModule(
@@ -338,7 +413,7 @@ class OnlineSpikingVGGF(nn.Module):
                     single_step_neuron(**kwargs, neuron_dropout=0.0),
                     Scale(2.74),
                     nn.Dropout(),
-                    nn.Linear(4096, num_classes),
+                    nn.Linear(4096, n_classes),
                 )
         if init_weights:
             self._initialize_weights()
@@ -450,10 +525,23 @@ class OnlineSpikingVGGF(nn.Module):
         return self.features.get_spike()
 
 
-def _spiking_vggf(arch, cfg, weight_standardization, pretrained, progress, single_step_neuron: callable = None, **kwargs):
+def _spiking_vggf(
+        arch,
+        cfg,
+        weight_standardization,
+        pretrained,
+        progress,
+        single_step_neuron: callable = None,
+        **kwargs
+):
     if pretrained:
         kwargs['init_weights'] = False
-    model = OnlineSpikingVGGF(cfg=cfgs[cfg], weight_standardization=weight_standardization, single_step_neuron=single_step_neuron, **kwargs)
+    model = OnlineSpikingVGGF(
+        cfg=cfgs[cfg],
+        weight_standardization=weight_standardization,
+        single_step_neuron=single_step_neuron,
+        **kwargs
+    )
     if pretrained:
         state_dict = load_state_dict_from_url(model_urls[arch],
                                               progress=progress)
@@ -461,5 +549,13 @@ def _spiking_vggf(arch, cfg, weight_standardization, pretrained, progress, singl
     return model
 
 
-def online_spiking_vgg11f_ws(pretrained=False, progress=True, single_step_neuron: callable = None, **kwargs):
-    return _spiking_vggf('vgg11', 'A', True, pretrained, progress, single_step_neuron, **kwargs)
+def online_spiking_vgg11f_ws(
+        pretrained=False,
+        progress=True,
+        single_step_neuron: callable = None,
+        **kwargs
+):
+    return _spiking_vggf(
+        'vgg11', 'A', True,
+        pretrained, progress, single_step_neuron, **kwargs
+    )

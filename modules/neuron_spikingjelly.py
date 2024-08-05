@@ -18,45 +18,6 @@ neuron_kernel = None
 class BaseNode(base.MemoryModule):
     def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False):
-        """
-        * :ref:`API in English <BaseNode.__init__-en>`
-
-        .. _BaseNode.__init__-cn:
-
-        :param v_threshold: 神经元的阈值电压
-        :type v_threshold: float
-
-        :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
-            如果设置为 ``None``，则电压会被减去 ``v_threshold``
-        :type v_reset: float
-
-        :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
-        :type surrogate_function: Callable
-
-        :param detach_reset: 是否将reset过程的计算图分离
-        :type detach_reset: bool
-
-        可微分SNN神经元的基类神经元。
-
-        * :ref:`中文API <BaseNode.__init__-cn>`
-
-        .. _BaseNode.__init__-en:
-
-        :param v_threshold: threshold voltage of neurons
-        :type v_threshold: float
-
-        :param v_reset: reset voltage of neurons. If not ``None``, voltage of neurons that just fired spikes will be set to
-            ``v_reset``. If ``None``, voltage of neurons that just fired spikes will subtract ``v_threshold``
-        :type v_reset: float
-
-        :param surrogate_function: surrogate function for replacing gradient of spiking functions during back-propagation
-        :type surrogate_function: Callable
-
-        :param detach_reset: whether detach the computation graph of reset
-        :type detach_reset: bool
-
-        This class is the base class of differentiable spiking neurons.
-        """
         assert isinstance(v_reset, float) or v_reset is None
         assert isinstance(v_threshold, float)
         assert isinstance(detach_reset, bool)
@@ -93,36 +54,13 @@ class BaseNode(base.MemoryModule):
 
     def neuronal_fire(self):
         """
-        * :ref:`API in English <BaseNode.neuronal_fire-en>`
-
-        .. _BaseNode.neuronal_fire-cn:
-
-        根据当前神经元的电压、阈值，计算输出脉冲。
-
-        * :ref:`中文API <BaseNode.neuronal_fire-cn>`
-
-        .. _BaseNode.neuronal_fire-en:
-
-
         Calculate out spikes of neurons by their current membrane potential and threshold voltage.
         """
-
         return self.surrogate_function(self.v - self.v_threshold)
 
     def neuronal_reset(self, spike):
         """
-        * :ref:`API in English <BaseNode.neuronal_reset-en>`
-
-        .. _BaseNode.neuronal_reset-cn:
-
-        根据当前神经元释放的脉冲，对膜电位进行重置。
-
-        * :ref:`中文API <BaseNode.neuronal_reset-cn>`
-
-        .. _BaseNode.neuronal_reset-en:
-
-
-        Reset the membrane potential according to neurons' output spikes.
+        Reset the membrane potential according to neurons output spikes.
         """
         if self.detach_reset:
             spike_d = spike.detach()
@@ -214,63 +152,6 @@ class AdaptiveBaseNode(BaseNode):
 class IFNode(BaseNode):
     def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
                  surrogate_function: Callable = surrogate.Sigmoid(), detach_reset: bool = False):
-        """
-        * :ref:`API in English <IFNode.__init__-en>`
-
-        .. _IFNode.__init__-cn:
-
-        :param v_threshold: 神经元的阈值电压
-        :type v_threshold: float
-
-        :param v_reset: 神经元的重置电压。如果不为 ``None``，当神经元释放脉冲后，电压会被重置为 ``v_reset``；
-            如果设置为 ``None``，则电压会被减去 ``v_threshold``
-        :type v_reset: float
-
-        :param surrogate_function: 反向传播时用来计算脉冲函数梯度的替代函数
-        :type surrogate_function: Callable
-
-        :param detach_reset: 是否将reset过程的计算图分离
-        :type detach_reset: bool
-
-        Integrate-and-Fire 神经元模型，可以看作理想积分器，无输入时电压保持恒定，不会像LIF神经元那样衰减。其阈下神经动力学方程为：
-
-        .. math::
-            V[t] = V[t-1] + X[t]
-
-        .. tip::
-
-            在 `self.v_reset is None` 且 `self.training == False` 时（这是典型的ANN2SNN应用），若运行在GPU上，则自动使用CUPY进行加速。
-
-        * :ref:`中文API <IFNode.__init__-cn>`
-
-        .. _IFNode.__init__-en:
-
-        :param v_threshold: threshold voltage of neurons
-        :type v_threshold: float
-
-        :param v_reset: reset voltage of neurons. If not ``None``, voltage of neurons that just fired spikes will be set to
-            ``v_reset``. If ``None``, voltage of neurons that just fired spikes will subtract ``v_threshold``
-        :type v_reset: float
-
-        :param surrogate_function: surrogate function for replacing gradient of spiking functions during back-propagation
-        :type surrogate_function: Callable
-
-        :param detach_reset: whether detach the computation graph of reset
-        :type detach_reset: bool
-
-        The Integrate-and-Fire neuron, which can be seen as a ideal integrator. The voltage of the IF neuron will not decay
-        as that of the LIF neuron. The subthreshold neural dynamics of it is as followed:
-
-        .. math::
-            V[t] = V[t-1] + X[t]
-
-        .. admonition:: Tip
-            :class: tip
-
-            If `self.v_reset is None` and `self.training == False`，which is the typical application of ANN2SNN, this
-            module will use CUPY to accelerate when running on GPU.
-
-        """
         super().__init__(v_threshold, v_reset, surrogate_function, detach_reset)
 
     def neuronal_charge(self, x: torch.Tensor):
@@ -939,7 +820,7 @@ class QIFNode(BaseNode):
         :param v_c: 关键电压
         :type v_c: float
 
-        :param a0: 
+        :param a0:
         :type a0: float
 
         :param v_threshold: 神经元的阈值电压
@@ -974,7 +855,7 @@ class QIFNode(BaseNode):
         :param v_c: critical voltage
         :type v_c: float
 
-        :param a0: 
+        :param a0:
         :type a0: float
 
         :param v_threshold: threshold voltage of neurons
@@ -999,7 +880,7 @@ class QIFNode(BaseNode):
         .. math::
             V[t] = V[t-1] + \\frac{1}{\\tau}(X[t] + a_0 (V[t-1] - V_{rest})(V[t-1] - V_c))
         """
-                 
+
         assert isinstance(tau, float) and tau > 1.
         if v_reset is not None:
             assert v_threshold > v_reset
@@ -1093,7 +974,7 @@ class EIFNode(BaseNode):
         .. math::
             V[t] = V[t-1] + \\frac{1}{\\tau}\\left(X[t] - (V[t-1] - V_{rest}) + \\Delta_T\\exp\\left(\\frac{V[t-1] - \\theta_{rh}}{\\Delta_T}\\right)\\right)
         """
-                 
+
         assert isinstance(tau, float) and tau > 1.
         if v_reset is not None:
             assert v_threshold > v_reset
@@ -1114,7 +995,7 @@ class EIFNode(BaseNode):
         with torch.no_grad():
             if not isinstance(self.v, torch.Tensor):
                 self.v = torch.as_tensor(self.v, device=x.device)
-        
+
         self.v = self.v + (x + self.v_rest - self.v + self.delta_T * torch.exp((self.v - self.theta_rh) / self.delta_T)) / self.tau
 
 class MultiStepEIFNode(EIFNode):
