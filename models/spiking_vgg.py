@@ -245,34 +245,34 @@ class OnlineSpikingVGG(Module):
     def get_spike(self):
         return self.features.get_spike()
 
-def _spiking_vgg(
-        arch,
-        cfg,
-        pretrained,
-        progress,
-        **kwargs):
-    if pretrained:
-        kwargs['init_weights'] = False
-    model = OnlineSpikingVGG(
-        **kwargs
-    )
-    if pretrained:
-        state_dict = load_state_dict_from_url(model_urls[arch],
-                                              progress=progress)
-        model.load_state_dict(state_dict)
-    return model
+# def spiking_vgg(
+#         arch,
+#         cfg,
+#         pretrained,
+#         progress,
+#         **kwargs):
+#     if pretrained:
+#         kwargs['init_weights'] = False
+#     model = OnlineSpikingVGG(
+#         **kwargs
+#     )
+#     if pretrained:
+#         state_dict = load_state_dict_from_url(model_urls[arch],
+#                                               progress=progress)
+#         model.load_state_dict(state_dict)
+#     return model
 
 
-def online_spiking_vgg11_ws(
-        pretrained = False,
-        progress = True,
-        **kwargs
-):
-    return _spiking_vgg(
-        'vgg11', 'A', pretrained,
-        progress,
-        **kwargs
-    )
+# def online_spiking_vgg11_ws(
+#         pretrained = False,
+#         progress = True,
+#         **kwargs
+# ):
+#     return spiking_vgg(
+#         'vgg11', 'A', pretrained,
+#         progress,
+#         **kwargs
+#     )
 
 
 

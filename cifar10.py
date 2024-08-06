@@ -1,10 +1,10 @@
-import datetime
-import time
-import torch
-
 from itertools import islice
 from pathlib import Path
+from models.spiking_vgg import OnlineSpikingVGG, spiking_vgg
 from modules.surrogate import Sigmoid
+
+from rich.table import Table
+from rich import print as rprint
 
 from torch.nn import MSELoss
 from torch.optim import SGD
@@ -24,26 +24,24 @@ from torchvision.transforms import (
     ToTensor
 )
 
+import numpy as np
+import torch
+
 ########################################################################
 
 import torch.nn.functional as F
-from models import spiking_vgg
-from utils import Bar, Logger, AverageMeter
 
 _seed_ = 2022
 import random
 random.seed(_seed_)
-
 torch.manual_seed(_seed_)
-
-import numpy as np
 np.random.seed(_seed_)
 
 N_EPOCHS = 300
 N_CLS = 10
-BS = 128
+BS = 32
 DATA_DIR = Path('/tmp/data')
-LOG_DIR = Path('./logs')
+LOG_DIR = Path('/tmp/logs')
 
 # Simulation settings
 N_T_STEPS = 6
@@ -75,14 +73,14 @@ def main():
         ),
     ])
 
-    trainset = CIFAR10(
+    d_tr = CIFAR10(
         root=DATA_DIR,
         train=True,
         download=True,
         transform=trans_tr
     )
     l_tr = DataLoader(
-        trainset,
+        d_tr,
         batch_size=BS,
         shuffle=True
     )
@@ -95,9 +93,16 @@ def main():
     )
     l_te = DataLoader(d_te, batch_size=BS, shuffle=False)
 
-    model = spiking_vgg.__dict__['online_spiking_vgg11_ws']
-    print(model)
-    net = model(
+    tab = Table('Parameter', 'Value', title = 'Parameters')
+    params = [
+        ('Batch size', BS),
+        ('N training batches', len(l_tr))
+    ]
+    for n, v in params:
+        tab.add_row(n, str(v))
+    rprint(tab)
+
+    net = OnlineSpikingVGG(
         tau = TAU,
         surrogate_function = Sigmoid(alpha=4),
         track_rate = True,
@@ -116,130 +121,76 @@ def main():
     )
 
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=T_MAX)
-
     max_test_acc = 0
-
-    writer = SummaryWriter(LOG_DIR / 'logs', purge_step=0)
-
+    writer = SummaryWriter(LOG_DIR)
     crit = MSELoss()
 
     for epoch in range(N_EPOCHS):
+
+        print('== Training %3d/%3d ==' % (epoch, N_EPOCHS))
+
         net.train()
-
-        batch_time = AverageMeter()
-        data_time = AverageMeter()
-        losses = AverageMeter()
-        start_time = time.time()
-
-        bar = Bar('Processing', max=len(l_tr))
 
         train_loss = 0
         train_acc = 0
-        train_samples = 0
-        batch_idx = 0
-        for frame, label in islice(l_tr, 5):
-            batch_idx += 1
+        n_samples = 0
+        for idx, (frame, y) in enumerate(islice(l_tr, 5)):
             frame = frame.float()
             batch_loss = 0
+            total_fr = torch.zeros((BS, N_CLS))
             optimizer.zero_grad()
             for t in range(N_T_STEPS):
-                if t == 0:
-                    out_fr = net(frame, init=True)
-                    total_fr = out_fr.clone().detach()
-                else:
-                    out_fr = net(frame)
-                    total_fr += out_fr.clone().detach()
-                label_one_hot = F.one_hot(label, N_CLS).float()
-                mse_loss = crit(out_fr, label_one_hot)
-                loss = ((1 - LOSS_LAMBDA) * F.cross_entropy(out_fr, label) + LOSS_LAMBDA * mse_loss) / N_T_STEPS
+                out_fr = net(frame, init = (t == 0))
+                total_fr += out_fr.clone().detach()
+                y_one_hot = F.one_hot(y, N_CLS).float()
+                mse_loss = crit(out_fr, y_one_hot)
+                loss = ((1 - LOSS_LAMBDA) * F.cross_entropy(out_fr, y) + LOSS_LAMBDA * mse_loss) / N_T_STEPS
                 loss.backward()
 
                 batch_loss += loss.item()
-                train_loss += loss.item() * label.numel()
+                train_loss += loss.item() * BS
             optimizer.step()
+            n_samples += BS
+            train_acc += (total_fr.argmax(1) == y).float().sum().item()
 
-            losses.update(batch_loss, frame.size(0))
+            print('%4d/%4d, batch loss %.4f' % (idx, len(l_tr), batch_loss))
 
-            train_samples += label.numel()
-            train_acc += (total_fr.argmax(1) == label).float().sum().item()
-
-            # measure elapsed time
-            batch_time.update(time.time() - start_time)
-            end = time.time()
-
-            bar.suffix  = '({batch}/{size}) Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f}'.format(
-                batch=batch_idx,
-                size=len(l_tr),
-                bt=batch_time.avg,
-                total=bar.elapsed_td,
-                eta=bar.eta_td,
-                loss=losses.avg,
-            )
-            bar.next()
-        bar.finish()
-
-        train_loss /= train_samples
-        train_acc /= train_samples
+        train_loss /= n_samples
+        train_acc /= n_samples
 
         writer.add_scalar('train_loss', train_loss, epoch)
         writer.add_scalar('train_acc', train_acc, epoch)
         lr_scheduler.step()
 
+        print('== Testing %3d/%3d ==' % (epoch, N_EPOCHS))
         net.eval()
-
-        batch_time = AverageMeter()
-        data_time = AverageMeter()
-        losses = AverageMeter()
-        end = time.time()
-        bar = Bar('Processing', max=len(l_te))
 
         test_loss = 0
         test_acc = 0
-        test_samples = 0
-        batch_idx = 0
+        n_samples = 0
         with torch.no_grad():
-            for frame, label in l_te:
-                batch_idx += 1
+            for idx, (frame, label) in enumerate(islice(l_te, 3)):
                 frame = frame.float()
                 total_loss = 0
 
+                total_fr = torch.zeros((BS, N_CLS))
                 for t in range(N_T_STEPS):
-                    input_frame = frame
-                    if t == 0:
-                        out_fr = net(input_frame, init=True)
-                        total_fr = out_fr.clone().detach()
-                    else:
-                        out_fr = net(input_frame)
-                        total_fr += out_fr.clone().detach()
+                    out_fr = net(frame, init = (t == 0))
+                    total_fr += out_fr.clone().detach()
+
                     label_one_hot = F.one_hot(label, N_CLS).float()
                     mse_loss = crit(out_fr, label_one_hot)
                     loss = ((1 - LOSS_LAMBDA) * F.cross_entropy(out_fr, label) + LOSS_LAMBDA * mse_loss) / N_T_STEPS
                     total_loss += loss
 
-                test_samples += label.numel()
-                test_loss += total_loss.item() * label.numel()
+                n_samples += BS
+                test_loss += total_loss.item() * BS
                 test_acc += (total_fr.argmax(1) == label).float().sum().item()
 
-                losses.update(total_loss, input_frame.size(0))
+                print('%4d/%4d, batch loss %.4f' % (idx, len(l_te), total_loss))
 
-                # measure elapsed time
-                batch_time.update(time.time() - end)
-                end = time.time()
-
-                # plot progress
-                bar.suffix = '({batch}/{size}) Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | Loss: {loss:.4f}'.format(
-                    batch=batch_idx,
-                    size=len(l_te),
-                    bt=batch_time.avg,
-                    total=bar.elapsed_td,
-                    eta=bar.eta_td,
-                    loss=losses.avg,
-                )
-                bar.next()
-        bar.finish()
-
-        test_loss /= test_samples
-        test_acc /= test_samples
+        test_loss /= n_samples
+        test_acc /= n_samples
         writer.add_scalar('test_loss', test_loss, epoch)
         writer.add_scalar('test_acc', test_acc, epoch)
 
@@ -261,8 +212,7 @@ def main():
 
         torch.save(checkpoint, LOG_DIR / 'checkpoint_latest.pth')
 
-        total_time = time.time() - start_time
-        print(f'epoch={epoch}, train_loss={train_loss}, train_acc={train_acc}, test_loss={test_loss}, test_acc={test_acc}, max_test_acc={max_test_acc}, total_time={total_time}, escape_time={(datetime.datetime.now()+datetime.timedelta(seconds=total_time * (N_EPOCHS - epoch))).strftime("%Y-%m-%d %H:%M:%S")}')
+        print(f'train_loss={train_loss}, train_acc={train_acc}, test_loss={test_loss}, test_acc={test_acc}, max_test_acc={max_test_acc}')
 
 if __name__ == '__main__':
     main()
