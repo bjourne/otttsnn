@@ -1,7 +1,6 @@
 from itertools import islice
 from pathlib import Path
 from modules.neuron import OnlineLIFNode
-from modules.surrogate import SurrogateFunctionBase
 
 from rich.table import Table
 from rich import print as rprint
@@ -86,10 +85,25 @@ class sigmoid(Function):
 
         return grad_x, None
 
-class Sigmoid(SurrogateFunctionBase):
-    def __init__(self, alpha=4.0, spiking=True):
-        super().__init__(alpha, spiking)
+class SurrogateFunctionBase(Module):
+    def __init__(self, alpha):
+        super().__init__()
+        self.alpha = alpha
 
+    @staticmethod
+    def spiking_function(x, alpha):
+        raise NotImplementedError
+
+    @staticmethod
+    def primitive_function(x, alpha):
+        raise NotImplementedError
+
+    def forward(self, x: torch.Tensor):
+        return self.spiking_function(x, self.alpha)
+
+class Sigmoid(SurrogateFunctionBase):
+    def __init__(self, alpha, spiking):
+        super().__init__(alpha)
 
     @staticmethod
     def spiking_function(x, alpha):
@@ -298,7 +312,7 @@ def main():
 
     net = OnlineSpikingVGG(
         tau = TAU,
-        surrogate_function = Sigmoid(alpha=4),
+        surrogate_function = Sigmoid(4, True),
         track_rate = True,
         c_in = 3,
         neuron_dropout = 0.0,
