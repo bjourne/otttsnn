@@ -1,6 +1,7 @@
+from abc import abstractmethod
 from itertools import islice
 from pathlib import Path
-from modules.neuron_spikingjelly import BaseNode
+from modules.base import MemoryModule
 
 from rich.table import Table
 from rich import print as rprint
@@ -59,6 +60,7 @@ LOG_DIR = Path('/tmp/logs')
 # Simulation settings
 N_T_STEPS = 6
 TAU = 2.0
+ALPHA = 4.0
 
 # Optimization settings
 LR = 0.1
@@ -87,21 +89,56 @@ class sigmoid(Function):
         return grad_x, None
 
 class Sigmoid(Module):
-    def __init__(self, alpha):
+    def __init__(self):
         super().__init__()
-        self.alpha = alpha
 
     def forward(self, x: torch.Tensor):
-        return sigmoid.apply(x, self.alpha)
+        return sigmoid.apply(x, ALPHA)
+
+class BaseNode(MemoryModule):
+    def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
+                 surrogate_function: Callable = Sigmoid(), detach_reset: bool = False):
+        assert isinstance(v_reset, float) or v_reset is None
+        assert isinstance(v_threshold, float)
+        assert isinstance(detach_reset, bool)
+        super().__init__()
+
+        if v_reset is None:
+            self.register_memory('v', 0.)
+        else:
+            self.register_memory('v', v_reset)
+
+        self.register_memory('v_threshold', v_threshold)
+        self.register_memory('v_reset', v_reset)
+
+        self.detach_reset = detach_reset
+        self.surrogate_function = surrogate_function
+
+    def neuronal_fire(self):
+        return self.surrogate_function(self.v - self.v_threshold)
+
+    def neuronal_reset(self, spike):
+        if self.detach_reset:
+            spike_d = spike.detach()
+        else:
+            spike_d = spike
+
+        if self.v_reset is None:
+            # soft reset
+            self.v = self.v - spike_d * self.v_threshold
+
+        else:
+            # hard reset
+            self.v = (1. - spike_d) * self.v + spike_d * self.v_reset
 
 class LIFNode(BaseNode):
-    def __init__(self, v_reset: float = 0., surrogate_function: Callable = Sigmoid(4),
+    def __init__(self, v_reset: float = 0., surrogate_function: Callable = Sigmoid(),
                  detach_reset: bool = False):
         super().__init__(1.0, v_reset, surrogate_function, detach_reset)
 
 class OnlineLIFNode(LIFNode):
-    def __init__(self, v_reset: float = None, **kwargs):
-        super().__init__(None, Sigmoid(4.0), True)
+    def __init__(self):
+        super().__init__(None, Sigmoid(), True)
         self.register_memory('rate_tracking', None)
 
     def neuronal_charge(self, x: torch.Tensor):
@@ -207,9 +244,9 @@ class WrapedSNNOp(Module):
             return self.op(x)
 
 class OnlineSpikingVGG(Module):
-    def __init__(self, **kwargs):
+    def __init__(self):
         super(OnlineSpikingVGG, self).__init__()
-        self.features = self.make_layers(**kwargs)
+        self.features = self.make_layers()
         self.avgpool = AdaptiveAvgPool2d((1, 1))
         self.classifier = SequentialModule(
             WrapedSNNOp(Linear(512, N_CLS))
@@ -257,8 +294,7 @@ class OnlineSpikingVGG(Module):
                 init.constant_(m.bias, 0)
 
     @staticmethod
-    def make_layers(**kwargs):
-        print(kwargs)
+    def make_layers():
         layers = []
         in_channels = 3
         first_conv = True
@@ -276,7 +312,7 @@ class OnlineSpikingVGG(Module):
                     conv2d = WrapedSNNOp(
                         ScaledWSConv2d(in_channels, v)
                     )
-                layers += [conv2d, OnlineLIFNode(**kwargs), Scale(2.74)]
+                layers += [conv2d, OnlineLIFNode(), Scale(2.74)]
                 in_channels = v
             else:
                 assert False
@@ -330,7 +366,7 @@ def main():
         tab.add_row(n, str(v))
     rprint(tab)
 
-    net = OnlineSpikingVGG(c_in = 3)
+    net = OnlineSpikingVGG()
     print('Total Parameters: %.2fM' % (sum(p.numel() for p in net.parameters()) / 1000000.0))
 
     optimizer = SGD(
