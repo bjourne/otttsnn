@@ -1,6 +1,6 @@
 from itertools import islice
 from pathlib import Path
-from modules.neuron import OnlineLIFNode
+from modules.neuron_spikingjelly import BaseNode
 
 from rich.table import Table
 from rich import print as rprint
@@ -38,6 +38,7 @@ from torchvision.transforms import (
     RandomCrop, RandomHorizontalFlip,
     ToTensor
 )
+from typing import Callable, overload
 
 import numpy as np
 import random
@@ -85,33 +86,52 @@ class sigmoid(Function):
 
         return grad_x, None
 
-class SurrogateFunctionBase(Module):
+class Sigmoid(Module):
     def __init__(self, alpha):
         super().__init__()
         self.alpha = alpha
 
-    @staticmethod
-    def spiking_function(x, alpha):
-        raise NotImplementedError
-
-    @staticmethod
-    def primitive_function(x, alpha):
-        raise NotImplementedError
-
     def forward(self, x: torch.Tensor):
-        return self.spiking_function(x, self.alpha)
+        return sigmoid.apply(x, self.alpha)
 
-class Sigmoid(SurrogateFunctionBase):
-    def __init__(self, alpha, spiking):
-        super().__init__(alpha)
+class LIFNode(BaseNode):
+    def __init__(self, v_reset: float = 0., surrogate_function: Callable = Sigmoid(4),
+                 detach_reset: bool = False):
+        super().__init__(1.0, v_reset, surrogate_function, detach_reset)
 
-    @staticmethod
-    def spiking_function(x, alpha):
-        return sigmoid.apply(x, alpha)
+class OnlineLIFNode(LIFNode):
+    def __init__(self, v_reset: float = None, **kwargs):
+        super().__init__(None, Sigmoid(4.0), True)
+        self.register_memory('rate_tracking', None)
 
-    @staticmethod
-    def primitive_function(x: torch.Tensor, alpha):
-        return (x * alpha).sigmoid()
+    def neuronal_charge(self, x: torch.Tensor):
+        self.v = self.v.detach() * (1 - 1. / TAU) + x
+
+    def forward(self, x: torch.Tensor, **kwargs):
+        init = kwargs.get('init', False)
+        save_spike = kwargs.get('save_spike', False)
+        output_type = kwargs.get('output_type', 'spike')
+        if init:
+            self.v = torch.zeros_like(x)
+            self.rate_tracking = None
+
+        self.neuronal_charge(x)
+        spike = self.neuronal_fire()
+        self.neuronal_reset(spike)
+
+        if save_spike:
+            self.spike = spike
+
+        with torch.no_grad():
+            if self.rate_tracking == None:
+                self.rate_tracking = spike.clone().detach()
+            else:
+                self.rate_tracking = self.rate_tracking * (1 - 1. / TAU) + spike.clone().detach()
+
+        if output_type == 'spike_rate':
+            return torch.cat((spike, self.rate_tracking), dim=0)
+        else:
+            return spike
 
 class SequentialModule(Sequential):
     def __init__(self, *args):
@@ -310,14 +330,7 @@ def main():
         tab.add_row(n, str(v))
     rprint(tab)
 
-    net = OnlineSpikingVGG(
-        tau = TAU,
-        surrogate_function = Sigmoid(4, True),
-        track_rate = True,
-        c_in = 3,
-        neuron_dropout = 0.0,
-        v_reset = None
-    )
+    net = OnlineSpikingVGG(c_in = 3)
     print('Total Parameters: %.2fM' % (sum(p.numel() for p in net.parameters()) / 1000000.0))
 
     optimizer = SGD(
