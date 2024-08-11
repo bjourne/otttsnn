@@ -68,16 +68,13 @@ SGD_MOM = 0.9
 T_MAX = 300
 LOSS_LAMBDA = 0.05
 
-def heaviside(x: torch.Tensor):
-    return (x >= 0).to(x)
-
 class sigmoid(Function):
     @staticmethod
     def forward(ctx, x, alpha):
         if x.requires_grad:
             ctx.save_for_backward(x)
             ctx.alpha = alpha
-        return heaviside(x)
+        return (x >= 0).to(x)
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -96,50 +93,23 @@ class Sigmoid(Module):
         return sigmoid.apply(x, ALPHA)
 
 class BaseNode(MemoryModule):
-    def __init__(self, v_threshold: float = 1., v_reset: float = 0.,
-                 surrogate_function: Callable = Sigmoid(), detach_reset: bool = False):
-        assert isinstance(v_reset, float) or v_reset is None
-        assert isinstance(v_threshold, float)
-        assert isinstance(detach_reset, bool)
+    def __init__(self):
         super().__init__()
 
-        if v_reset is None:
-            self.register_memory('v', 0.)
-        else:
-            self.register_memory('v', v_reset)
-
-        self.register_memory('v_threshold', v_threshold)
-        self.register_memory('v_reset', v_reset)
-
-        self.detach_reset = detach_reset
-        self.surrogate_function = surrogate_function
-
-    def neuronal_fire(self):
-        return self.surrogate_function(self.v - self.v_threshold)
+        self.register_memory('v', 0.)
+        self.register_memory('v_threshold', 1.0)
+        self.register_memory('v_reset', None)
 
     def neuronal_reset(self, spike):
-        if self.detach_reset:
-            spike_d = spike.detach()
-        else:
-            spike_d = spike
+        spike_d = spike.detach()
+        # soft reset
+        self.v = self.v - spike_d * self.v_threshold
 
-        if self.v_reset is None:
-            # soft reset
-            self.v = self.v - spike_d * self.v_threshold
-
-        else:
-            # hard reset
-            self.v = (1. - spike_d) * self.v + spike_d * self.v_reset
-
-class LIFNode(BaseNode):
-    def __init__(self, v_reset: float = 0., surrogate_function: Callable = Sigmoid(),
-                 detach_reset: bool = False):
-        super().__init__(1.0, v_reset, surrogate_function, detach_reset)
-
-class OnlineLIFNode(LIFNode):
+class OnlineLIFNode(BaseNode):
     def __init__(self):
-        super().__init__(None, Sigmoid(), True)
+        super().__init__()
         self.register_memory('rate_tracking', None)
+        self.surrogate_function = Sigmoid()
 
     def neuronal_charge(self, x: torch.Tensor):
         self.v = self.v.detach() * (1 - 1. / TAU) + x
@@ -153,7 +123,7 @@ class OnlineLIFNode(LIFNode):
             self.rate_tracking = None
 
         self.neuronal_charge(x)
-        spike = self.neuronal_fire()
+        spike = self.surrogate_function(self.v - self.v_threshold)
         self.neuronal_reset(spike)
 
         if save_spike:
