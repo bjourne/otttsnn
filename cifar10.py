@@ -1,7 +1,5 @@
-from abc import abstractmethod
 from itertools import islice
 from pathlib import Path
-from modules.base import MemoryModule
 
 from rich.table import Table
 from rich import print as rprint
@@ -9,8 +7,6 @@ from rich import print as rprint
 from torch.autograd import Function
 from torch.nn import (
     AvgPool2d,
-    AdaptiveAvgPool2d,
-    BatchNorm2d,
     Conv2d,
     Linear,
     Module,
@@ -28,8 +24,6 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from torchinfo import summary
-
 from torchtoolbox.transform import Cutout
 
 from torchvision.datasets import CIFAR10
@@ -39,12 +33,10 @@ from torchvision.transforms import (
     RandomCrop, RandomHorizontalFlip,
     ToTensor
 )
-from typing import Callable, overload
 
 import numpy as np
 import random
 import torch
-import torch.nn.functional as F
 
 _seed_ = 2022
 random.seed(_seed_)
@@ -53,7 +45,7 @@ np.random.seed(_seed_)
 
 N_EPOCHS = 300
 N_CLS = 10
-BS = 128
+BS = 64
 DATA_DIR = Path('/tmp/data')
 LOG_DIR = Path('/tmp/logs')
 
@@ -61,6 +53,8 @@ LOG_DIR = Path('/tmp/logs')
 N_T_STEPS = 6
 TAU = 2.0
 ALPHA = 4.0
+V_THRESH = 1.0
+LEAK_LAMBDA = (1 - 1 / TAU)
 
 # Optimization settings
 LR = 0.1
@@ -70,96 +64,81 @@ LOSS_LAMBDA = 0.05
 
 class sigmoid(Function):
     @staticmethod
-    def forward(ctx, x, alpha):
-        if x.requires_grad:
-            ctx.save_for_backward(x)
-            ctx.alpha = alpha
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
         return (x >= 0).to(x)
 
     @staticmethod
     def backward(ctx, grad_output):
-        grad_x = None
-        if ctx.needs_input_grad[0]:
-            sgax = (ctx.saved_tensors[0] * ctx.alpha).sigmoid_()
-            grad_x = grad_output * (1. - sgax) * sgax * ctx.alpha
+        x = ctx.saved_tensors[0]
+        sgax = (x * ALPHA).sigmoid_()
+        grad_x = grad_output * (1 - sgax) * sgax * ALPHA
+        return grad_x,
 
-        return grad_x, None
-
-class Sigmoid(Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x: torch.Tensor):
-        return sigmoid.apply(x, ALPHA)
-
-class BaseNode(MemoryModule):
-    def __init__(self):
-        super().__init__()
-
-        self.register_memory('v', 0.)
-        self.register_memory('v_threshold', 1.0)
-        self.register_memory('v_reset', None)
-
-    def neuronal_reset(self, spike):
-        spike_d = spike.detach()
-        # soft reset
-        self.v = self.v - spike_d * self.v_threshold
-
-class OnlineLIFNode(BaseNode):
-    def __init__(self):
-        super().__init__()
-        self.register_memory('rate_tracking', None)
-        self.surrogate_function = Sigmoid()
-
-    def neuronal_charge(self, x: torch.Tensor):
-        self.v = self.v.detach() * (1 - 1. / TAU) + x
-
-    def forward(self, x: torch.Tensor, **kwargs):
-        init = kwargs.get('init', False)
-        save_spike = kwargs.get('save_spike', False)
-        output_type = kwargs.get('output_type', 'spike')
+class OnlineLIFNode(Module):
+    def forward(self, x, init):
         if init:
             self.v = torch.zeros_like(x)
-            self.rate_tracking = None
+            self.rate = torch.zeros_like(x)
 
-        self.neuronal_charge(x)
-        spike = self.surrogate_function(self.v - self.v_threshold)
-        self.neuronal_reset(spike)
+        # Decay and add input
+        self.v = self.v.detach() * LEAK_LAMBDA + x
 
-        if save_spike:
-            self.spike = spike
+        # Check spiking
+        spike = sigmoid.apply(self.v - V_THRESH)
+
+        # Maybe soft reset
+        spike_d = spike.detach()
+        self.v = self.v - spike_d * V_THRESH
 
         with torch.no_grad():
-            if self.rate_tracking == None:
-                self.rate_tracking = spike.clone().detach()
-            else:
-                self.rate_tracking = self.rate_tracking * (1 - 1. / TAU) + spike.clone().detach()
+            spike_d = spike.clone().detach()
+            self.rate = self.rate * LEAK_LAMBDA + spike_d
 
-        if output_type == 'spike_rate':
-            return torch.cat((spike, self.rate_tracking), dim=0)
-        else:
-            return spike
+        if self.training:
+            return torch.cat((spike, self.rate))
+        return spike
+
+class Replace(Function):
+    @staticmethod
+    def forward(ctx, z1, z1_r):
+        return z1_r
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, grad
+
+class WrappedSNNOp(Module):
+    def __init__(self, op):
+        super(WrappedSNNOp, self).__init__()
+        self.op = op
+
+    def forward(self, x):
+        if self.training:
+            B = x.shape[0] // 2
+            spike = x[:B]
+            rate = x[B:]
+            with torch.no_grad():
+                out = self.op(spike).detach()
+            in_for_grad = Replace.apply(spike, rate)
+            out_for_grad = self.op(in_for_grad)
+            return Replace.apply(out_for_grad, out)
+        return self.op(x)
 
 class SequentialModule(Sequential):
     def __init__(self, *args):
         super(SequentialModule, self).__init__(*args)
 
-    def forward(self, x, **kwargs):
-        for module in self._modules.values():
-            if isinstance(module, OnlineLIFNode) or isinstance(module, WrapedSNNOp):
-                x = module(x, **kwargs)
+    def forward(self, x, init):
+        for mod in self._modules.values():
+            if isinstance(mod, OnlineLIFNode):
+                x = mod(x, init)
+                # Scaled weight standardization (see Section 4.4 and
+                # Appendix C.1).
+                x = x * 2.74
             else:
-                x = module(x)
+                x = mod(x)
         return x
-
-# For scaled weight standardization (see Section 4.4).
-class Scale(Module):
-    def __init__(self, scale):
-        super(Scale, self).__init__()
-        self.scale = scale
-
-    def forward(self, x, **kwargs):
-        return x * self.scale
 
 class ScaledWSConv2d(Conv2d):
     def __init__(self, in_channels, out_channels):
@@ -170,85 +149,25 @@ class ScaledWSConv2d(Conv2d):
         )
         self.gain = Parameter(torch.ones(self.out_channels, 1, 1, 1))
 
-    def get_weight(self):
+    def forward(self, x):
         fan_in = np.prod(self.weight.shape[1:])
         mean = torch.mean(self.weight, axis=[1, 2, 3], keepdims=True)
         var = torch.var(self.weight, axis=[1, 2, 3], keepdims=True)
         weight = (self.weight - mean) / ((var * fan_in + 1e-4) ** 0.5)
         weight = weight * self.gain
-        return weight
-
-    def forward(self, x):
         return conv2d(
-            x, self.get_weight(),
+            x, weight,
             self.bias, self.stride, self.padding, self.dilation,
             self.groups
         )
-
-class Replace(Function):
-    @staticmethod
-    def forward(ctx, z1, z1_r):
-        return z1_r
-
-    @staticmethod
-    def backward(ctx, grad):
-        return (grad, grad)
-
-class WrapedSNNOp(Module):
-    def __init__(self, op):
-        super(WrapedSNNOp, self).__init__()
-        self.op = op
-
-    def forward(self, x, require_wrap = True, **kwargs):
-        if require_wrap:
-            B = x.shape[0] // 2
-            spike = x[:B]
-            rate = x[B:]
-            with torch.no_grad():
-                out = self.op(spike).detach()
-            in_for_grad = Replace.apply(spike, rate)
-            out_for_grad = self.op(in_for_grad)
-            output = Replace.apply(out_for_grad, out)
-            return output
-        else:
-            return self.op(x)
 
 class OnlineSpikingVGG(Module):
     def __init__(self):
         super(OnlineSpikingVGG, self).__init__()
         self.features = self.make_layers()
-        self.avgpool = AdaptiveAvgPool2d((1, 1))
-        self.classifier = SequentialModule(
-            WrapedSNNOp(Linear(512, N_CLS))
-        )
-        self._initialize_weights()
-
-    def forward(self, x, **kwargs):
-        if self.training:
-            x = self.features(
-                x,
-                output_type='spike_rate',
-                require_wrap=True,
-                **kwargs
-            )
-            x = self.avgpool(x)
-            x = torch.flatten(x, 1)
-            x = self.classifier(
-                x,
-                output_type='spike_rate',
-                require_wrap=True,
-                **kwargs
-            )
-        else:
-            x = self.features(x, require_wrap=False, **kwargs)
-            x = self.avgpool(x)
-            x = torch.flatten(x, 1)
-            x = self.classifier(x, require_wrap=False, **kwargs)
-        return x
-
-    def _initialize_weights(self):
+        self.classifier = WrappedSNNOp(Linear(512, N_CLS))
         for m in self.modules():
-            if isinstance(m, Conv2d) or isinstance(m, ScaledWSConv2d):
+            if isinstance(m, Conv2d):
                 init.kaiming_normal_(
                     m.weight,
                     mode='fan_out',
@@ -256,12 +175,14 @@ class OnlineSpikingVGG(Module):
                 )
                 if m.bias is not None:
                     init.constant_(m.bias, 0)
-            elif isinstance(m, BatchNorm2d):
-                init.constant_(m.weight, 1)
-                init.constant_(m.bias, 0)
             elif isinstance(m, Linear):
                 init.normal_(m.weight, 0, 0.01)
                 init.constant_(m.bias, 0)
+
+    def forward(self, x, init):
+        x = self.features(x, init)
+        x = torch.mean(x, dim = (2, 3))
+        return self.classifier(x)
 
     @staticmethod
     def make_layers():
@@ -275,18 +196,20 @@ class OnlineSpikingVGG(Module):
             if v == 'M':
                 layers += [AvgPool2d(kernel_size=2, stride=2)]
             elif type(v) == int:
-                if first_conv:
-                    conv2d = ScaledWSConv2d(in_channels, v)
-                    first_conv = False
-                else:
-                    conv2d = WrapedSNNOp(
-                        ScaledWSConv2d(in_channels, v)
-                    )
-                layers += [conv2d, OnlineLIFNode(), Scale(2.74)]
+                conv2d = ScaledWSConv2d(in_channels, v)
+                if not first_conv:
+                    conv2d = WrappedSNNOp(conv2d)
+                first_conv = False
+                layers += [conv2d, OnlineLIFNode()]
                 in_channels = v
-            else:
-                assert False
         return SequentialModule(*layers)
+
+def compute_loss(yh, y):
+    y_one_hot = one_hot(y, N_CLS).float()
+    loss0 = LOSS_LAMBDA * mse_loss(yh, y_one_hot)
+    loss1 = (1 - LOSS_LAMBDA) * cross_entropy(yh, y)
+    loss = (loss0 + loss1) / N_T_STEPS
+    return loss
 
 def main():
     trans_tr = Compose([
@@ -331,6 +254,8 @@ def main():
     params = [
         ('Batch size', BS),
         ('N training batches', len(l_tr)),
+        ('V threshold', V_THRESH),
+        ('Leak lambda', LEAK_LAMBDA)
     ]
     for n, v in params:
         tab.add_row(n, str(v))
@@ -358,29 +283,24 @@ def main():
         train_loss = 0
         train_acc = 0
         n_batches = 3
-        for idx, (frame, y) in enumerate(islice(l_tr, n_batches)):
-            frame = frame.float()
+        for idx, (x, y) in enumerate(islice(l_tr, n_batches)):
             batch_loss = 0
             total_fr = torch.zeros((BS, N_CLS))
             optimizer.zero_grad()
             for t in range(N_T_STEPS):
-                yh = net(frame, init = (t == 0))
+                yh = net(x, t == 0)
                 total_fr += yh.clone().detach()
-                y_one_hot = one_hot(y, N_CLS).float()
-
-                loss0 = LOSS_LAMBDA * mse_loss(yh, y_one_hot)
-                loss1 = (1 - LOSS_LAMBDA) * cross_entropy(yh, y)
-                loss = (loss0 + loss1) / N_T_STEPS
+                loss = compute_loss(yh, y)
                 loss.backward()
 
                 batch_loss += loss.item()
-                train_loss += loss.item() * BS
+                train_loss += loss.item()
             optimizer.step()
             train_acc += (total_fr.argmax(1) == y).float().sum().item()
 
             print('%4d/%4d, batch loss %.4f' % (idx, n_batches, batch_loss))
 
-        train_loss /= (n_batches * BS)
+        train_loss /= n_batches
         train_acc /= (n_batches * BS)
 
         writer.add_scalar('train_loss', train_loss, epoch)
@@ -393,28 +313,22 @@ def main():
         test_acc = 0
         n_batches = 3
         with torch.no_grad():
-            for idx, (frame, y) in enumerate(islice(l_te, n_batches)):
-                frame = frame.float()
+            for idx, (x, y) in enumerate(islice(l_te, n_batches)):
                 batch_loss = 0
 
                 total_fr = torch.zeros((BS, N_CLS))
                 for t in range(N_T_STEPS):
-                    yh = net(frame, init = (t == 0))
+                    yh = net(x, t == 0)
                     total_fr += yh.clone().detach()
-                    y_one_hot = one_hot(y, N_CLS).float()
-
-                    loss0 = LOSS_LAMBDA * mse_loss(yh, y_one_hot)
-                    loss1 = (1 - LOSS_LAMBDA) * cross_entropy(yh, y)
-                    loss = (loss0 + loss1) / N_T_STEPS
+                    loss = compute_loss(yh, y)
                     batch_loss += loss
 
-                #n_samples += BS
-                test_loss += batch_loss.item() * BS
+                test_loss += batch_loss.item()
                 test_acc += (total_fr.argmax(1) == y).float().sum().item()
 
                 print('%4d/%4d, batch loss %.4f' % (idx, n_batches, batch_loss))
 
-        test_loss /= (n_batches * BS)
+        test_loss /= n_batches
         test_acc /= (n_batches * BS)
         writer.add_scalar('test_loss', test_loss, epoch)
         writer.add_scalar('test_acc', test_acc, epoch)
