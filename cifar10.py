@@ -217,18 +217,36 @@ def compute_loss(yh, y):
     loss = (loss0 + loss1) / N_T_STEPS
     return loss
 
-def propagate(net, x, y):
-    batch_loss = 0
+def propagate_batch(net, x, y):
+    loss = 0
     tot_yh = torch.zeros((BS, N_CLS))
     for t in range(N_T_STEPS):
         yh = net(x, t == 0)
         tot_yh += yh.clone().detach()
-        loss = compute_loss(yh, y)
-        batch_loss += loss.item()
+        ls = compute_loss(yh, y)
+        loss += ls.item()
         if net.training:
-            loss.backward()
-    batch_acc = (tot_yh.argmax(1) == y).float().sum().item() / BS
-    return batch_loss, batch_acc
+            ls.backward()
+    acc = (tot_yh.argmax(1) == y).float().sum().item() / BS
+    return loss, acc
+
+def propagate_all(net, opt, loader, epoch):
+    args = ('Training' if net.train else 'Testing', epoch, N_EPOCHS)
+    print('== %s %3d/%3d ==' % args)
+
+    tot_loss = 0
+    tot_acc = 0
+    n = len(loader)
+    for i, (x, y) in enumerate(islice(loader, n)):
+        if net.train:
+            opt.zero_grad()
+        loss, acc = propagate_batch(net, x, y)
+        if net.train:
+            opt.step()
+        print('%4d/%4d, loss/acc: %.4f/%.2f' % (i, n, loss, acc))
+        tot_loss += loss
+        tot_acc += acc
+    return tot_loss / n, tot_acc / n
 
 def main():
     trans_tr = Compose([
@@ -236,31 +254,19 @@ def main():
         Cutout(),
         RandomHorizontalFlip(),
         ToTensor(),
-        Normalize(
-            (0.4914, 0.4822, 0.4465),
-            (0.2023, 0.1994, 0.2010)
-        ),
+        Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
     ])
     trans_te = Compose([
         ToTensor(),
-        Normalize(
-            (0.4914, 0.4822, 0.4465),
-            (0.2023, 0.1994, 0.2010)
-        ),
+        Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
     ])
-
     d_tr = CIFAR10(
         root=DATA_DIR,
         train=True,
         download=True,
         transform=trans_tr
     )
-    l_tr = DataLoader(
-        d_tr,
-        batch_size=BS,
-        shuffle=True
-    )
-
+    l_tr = DataLoader(d_tr, batch_size=BS, shuffle=True)
     d_te = CIFAR10(
         root=DATA_DIR,
         train=False,
@@ -281,54 +287,23 @@ def main():
     rprint(tab)
 
     net = OnlineSpikingVGG()
-    print('Total Parameters: %.2fM' % (sum(p.numel() for p in net.parameters()) / 1000000.0))
+    print('Total Parameters: %.2fM'
+          % (sum(p.numel() for p in net.parameters()) / 1000000.0))
 
-    optimizer = SGD(
-        net.parameters(),
-        lr=LR,
-        momentum=SGD_MOM,
-    )
-
-    lr_scheduler = CosineAnnealingLR(optimizer, T_max=T_MAX)
+    opt = SGD(net.parameters(), LR, SGD_MOM)
+    lr_scheduler = CosineAnnealingLR(opt, T_max=T_MAX)
     max_test_acc = 0
     writer = SummaryWriter(LOG_DIR)
 
     for epoch in range(N_EPOCHS):
-
-        print('== Training %3d/%3d ==' % (epoch, N_EPOCHS))
         net.train()
-
-        train_loss = 0
-        train_acc = 0
-        n_batches = len(l_tr)
-        for i, (x, y) in enumerate(islice(l_tr, n_batches)):
-            optimizer.zero_grad()
-            batch_loss, batch_acc = propagate(net, x, y)
-            optimizer.step()
-            train_acc += batch_acc
-            train_loss += batch_loss
-            print('%4d/%4d, batch loss %.4f' % (i, n_batches, batch_loss))
-
-        train_loss /= n_batches
-        train_acc /= n_batches
+        train_loss, train_acc = propagate_all(net, opt, l_tr, epoch)
         writer.add_scalar('train_loss', train_loss, epoch)
         writer.add_scalar('train_acc', train_acc, epoch)
         lr_scheduler.step()
 
-        print('== Testing %3d/%3d ==' % (epoch, N_EPOCHS))
         net.eval()
-        test_loss = 0
-        test_acc = 0
-        n_batches = len(l_te)
-        with torch.no_grad():
-            for i, (x, y) in enumerate(islice(l_te, n_batches)):
-                batch_loss, batch_acc = propagate(net, x, y)
-                test_loss += batch_loss
-                test_acc += batch_acc
-                print('%4d/%4d, batch loss %.4f' % (i, n_batches, batch_loss))
-
-        test_loss /= n_batches
-        test_acc /= n_batches
+        test_loss, test_acc = propagate_all(net, opt, l_te, epoch)
         writer.add_scalar('test_loss', test_loss, epoch)
         writer.add_scalar('test_acc', test_acc, epoch)
 
@@ -339,7 +314,7 @@ def main():
 
         checkpoint = {
             'net': net.state_dict(),
-            'optimizer': optimizer.state_dict(),
+            'opt': opt.state_dict(),
             'lr_scheduler': lr_scheduler.state_dict(),
             'epoch': epoch,
             'max_test_acc': max_test_acc
