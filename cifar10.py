@@ -1,6 +1,6 @@
 # Copyright (C) 2024 Björn Lindqvist
 #
-# Reimplementation of Online Training Through Time for Spiking Neural Networks
+# Reimplementation of "Online Training Through Time for Spiking Neural Networks"
 #
 # Code : https://github.com/pkuxmq/OTTT-SNN
 # Paper: https://arxiv.org/abs/2210.04195
@@ -230,8 +230,9 @@ def propagate_batch(net, x, y):
     acc = (tot_yh.argmax(1) == y).float().sum().item() / BS
     return loss, acc
 
-def propagate_all(net, opt, loader, epoch):
-    args = ('Training' if net.train else 'Testing', epoch, N_EPOCHS)
+def propagate_all(net, opt, loader, epoch, writer):
+    phase = 'train' if net.train else 'test'
+    args = phase, epoch, N_EPOCHS
     print('== %s %3d/%3d ==' % args)
 
     tot_loss = 0
@@ -246,7 +247,11 @@ def propagate_all(net, opt, loader, epoch):
         print('%4d/%4d, loss/acc: %.4f/%.2f' % (i, n, loss, acc))
         tot_loss += loss
         tot_acc += acc
-    return tot_loss / n, tot_acc / n
+    tot_loss /= n
+    tot_acc /= n
+    writer.add_scalar('%s_loss', tot_loss, epoch)
+    writer.add_scalar('%s_acc', tot_acc, epoch)
+    return tot_loss, tot_acc
 
 def main():
     trans_tr = Compose([
@@ -297,21 +302,14 @@ def main():
 
     for epoch in range(N_EPOCHS):
         net.train()
-        train_loss, train_acc = propagate_all(net, opt, l_tr, epoch)
-        writer.add_scalar('train_loss', train_loss, epoch)
-        writer.add_scalar('train_acc', train_acc, epoch)
+        train_loss, train_acc = propagate_all(net, opt, l_tr, epoch, writer)
         lr_scheduler.step()
 
         net.eval()
-        test_loss, test_acc = propagate_all(net, opt, l_te, epoch)
-        writer.add_scalar('test_loss', test_loss, epoch)
-        writer.add_scalar('test_acc', test_acc, epoch)
+        test_loss, test_acc = propagate_all(net, opt, l_te, epoch, writer)
 
-        save_max = False
-        if test_acc > max_test_acc:
-            max_test_acc = test_acc
-            save_max = True
-
+        save_max = test_acc > max_test_acc
+        max_test_acc = max(max_test_acc, test_acc)
         checkpoint = {
             'net': net.state_dict(),
             'opt': opt.state_dict(),
