@@ -271,14 +271,14 @@ def main():
         download=True,
         transform=trans_tr
     )
-    l_tr = DataLoader(d_tr, batch_size=BS, shuffle=True)
+    l_tr = DataLoader(d_tr, batch_size=BS, shuffle=True, drop_last=True)
     d_te = CIFAR10(
         root=DATA_DIR,
         train=False,
         download=False,
         transform=trans_te
     )
-    l_te = DataLoader(d_te, batch_size=BS, shuffle=False)
+    l_te = DataLoader(d_te, batch_size=BS, shuffle=True, drop_last=True)
 
     tab = Table('Parameter', 'Value', title = 'Parameters')
     params = [
