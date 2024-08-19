@@ -1,3 +1,9 @@
+# Copyright (C) 2024 Björn Lindqvist
+#
+# Reimplementation of Online Training Through Time for Spiking Neural Networks
+#
+# Code : https://github.com/pkuxmq/OTTT-SNN
+# Paper: https://arxiv.org/abs/2210.04195
 from itertools import islice
 from pathlib import Path
 
@@ -45,7 +51,7 @@ np.random.seed(_seed_)
 
 N_EPOCHS = 300
 N_CLS = 10
-BS = 64
+BS = 128
 DATA_DIR = Path('/tmp/data')
 LOG_DIR = Path('/tmp/logs')
 
@@ -187,21 +193,21 @@ class OnlineSpikingVGG(Module):
     @staticmethod
     def make_layers():
         layers = []
-        in_channels = 3
+        n_chan_in = 3
         first_conv = True
 
         # Only one VGG arch
         cfg = [64, 128, 'M', 256, 256, 'M', 512, 512, 'M', 512, 512]
         for v in cfg:
             if v == 'M':
-                layers += [AvgPool2d(kernel_size=2, stride=2)]
+                layers += [AvgPool2d(2, 2)]
             elif type(v) == int:
-                conv2d = ScaledWSConv2d(in_channels, v)
+                conv2d = ScaledWSConv2d(n_chan_in, v)
                 if not first_conv:
                     conv2d = WrappedSNNOp(conv2d)
                 first_conv = False
                 layers += [conv2d, OnlineLIFNode()]
-                in_channels = v
+                n_chan_in = v
         return SequentialModule(*layers)
 
 def compute_loss(yh, y):
@@ -210,6 +216,19 @@ def compute_loss(yh, y):
     loss1 = (1 - LOSS_LAMBDA) * cross_entropy(yh, y)
     loss = (loss0 + loss1) / N_T_STEPS
     return loss
+
+def propagate(net, x, y):
+    batch_loss = 0
+    tot_yh = torch.zeros((BS, N_CLS))
+    for t in range(N_T_STEPS):
+        yh = net(x, t == 0)
+        tot_yh += yh.clone().detach()
+        loss = compute_loss(yh, y)
+        batch_loss += loss.item()
+        if net.training:
+            loss.backward()
+    batch_acc = (tot_yh.argmax(1) == y).float().sum().item() / BS
+    return batch_loss, batch_acc
 
 def main():
     trans_tr = Compose([
@@ -277,32 +296,21 @@ def main():
     for epoch in range(N_EPOCHS):
 
         print('== Training %3d/%3d ==' % (epoch, N_EPOCHS))
-
         net.train()
 
         train_loss = 0
         train_acc = 0
-        n_batches = 3
-        for idx, (x, y) in enumerate(islice(l_tr, n_batches)):
-            batch_loss = 0
-            total_fr = torch.zeros((BS, N_CLS))
+        n_batches = len(l_tr)
+        for i, (x, y) in enumerate(islice(l_tr, n_batches)):
             optimizer.zero_grad()
-            for t in range(N_T_STEPS):
-                yh = net(x, t == 0)
-                total_fr += yh.clone().detach()
-                loss = compute_loss(yh, y)
-                loss.backward()
-
-                batch_loss += loss.item()
-                train_loss += loss.item()
+            batch_loss, batch_acc = propagate(net, x, y)
             optimizer.step()
-            train_acc += (total_fr.argmax(1) == y).float().sum().item()
-
-            print('%4d/%4d, batch loss %.4f' % (idx, n_batches, batch_loss))
+            train_acc += batch_acc
+            train_loss += batch_loss
+            print('%4d/%4d, batch loss %.4f' % (i, n_batches, batch_loss))
 
         train_loss /= n_batches
-        train_acc /= (n_batches * BS)
-
+        train_acc /= n_batches
         writer.add_scalar('train_loss', train_loss, epoch)
         writer.add_scalar('train_acc', train_acc, epoch)
         lr_scheduler.step()
@@ -311,25 +319,16 @@ def main():
         net.eval()
         test_loss = 0
         test_acc = 0
-        n_batches = 3
+        n_batches = len(l_te)
         with torch.no_grad():
-            for idx, (x, y) in enumerate(islice(l_te, n_batches)):
-                batch_loss = 0
-
-                total_fr = torch.zeros((BS, N_CLS))
-                for t in range(N_T_STEPS):
-                    yh = net(x, t == 0)
-                    total_fr += yh.clone().detach()
-                    loss = compute_loss(yh, y)
-                    batch_loss += loss
-
-                test_loss += batch_loss.item()
-                test_acc += (total_fr.argmax(1) == y).float().sum().item()
-
-                print('%4d/%4d, batch loss %.4f' % (idx, n_batches, batch_loss))
+            for i, (x, y) in enumerate(islice(l_te, n_batches)):
+                batch_loss, batch_acc = propagate(net, x, y)
+                test_loss += batch_loss
+                test_acc += batch_acc
+                print('%4d/%4d, batch loss %.4f' % (i, n_batches, batch_loss))
 
         test_loss /= n_batches
-        test_acc /= (n_batches * BS)
+        test_acc /= n_batches
         writer.add_scalar('test_loss', test_loss, epoch)
         writer.add_scalar('test_acc', test_acc, epoch)
 
@@ -351,9 +350,10 @@ def main():
 
         torch.save(checkpoint, LOG_DIR / 'checkpoint_latest.pth')
 
-        print('losses %5.3f/%5.3f acc %5.3f/%5.3f, best acc %5.3f' % (train_loss, test_loss,
-                                                                      train_acc, test_acc,
-                                                                      max_test_acc))
+        fmt = 'losses %5.3f/%5.3f acc %5.3f/%5.3f, best acc %5.3f'
+        print(fmt % (train_loss, test_loss,
+                     train_acc, test_acc,
+                     max_test_acc))
 
 if __name__ == '__main__':
     main()
